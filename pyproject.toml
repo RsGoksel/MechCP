@@ -22,7 +22,7 @@ dependencies = [
     "nodriver==0.47.0",
     "pydantic==2.11.7",
     "python-dotenv==1.1.1",
-    "py2js @ git+https://github.com/am230/py2js.git@31a83c7c25a51ab0cc3255f484a2279d26278ec3",
+    "py2js @ file:///./vendor/py2js",
     "jsbeautifier==1.15.4",
     "strinpy==0.0.4",
     "strbuilder==1.1.3",
