@@ -335,19 +335,12 @@ class ElementCloner:
                 return {"error": f"Unexpected return type: {type(asset_data)}", "raw_data": str(asset_data)}
             
             if fetch_external and isinstance(asset_data, dict):
-                asset_data['external_assets'] = {}
-                for bg_img in asset_data.get('background_images', []):
-                    try:
-                        url = bg_img.get('url', '')
-                        if url.startswith('http'):
-                            response = requests.get(url, timeout=5)
-                            asset_data['external_assets'][url] = {
-                                'content_type': response.headers.get('content-type'),
-                                'size': len(response.content),
-                                'status': response.status_code
-                            }
-                    except Exception as e:
-                        debug_logger.log_warning("element_cloner", "extract_assets", f"Could not fetch asset {url}: {e}")
+                bg_urls = [
+                    bg.get('url', '')
+                    for bg in asset_data.get('background_images', [])
+                    if bg.get('url', '').startswith('http')
+                ]
+                asset_data['external_assets'] = await self._fetch_asset_metadata(bg_urls)
             
             debug_logger.log_info("element_cloner", "extract_assets", f"Extracted assets for element")
             return asset_data
@@ -415,51 +408,79 @@ class ElementCloner:
             debug_logger.log_error("element_cloner", "extract_related_files", e)
             return {"error": str(e)}
 
+    async def _fetch_url_text(self, url: str, timeout: int = 10) -> Optional[Dict[str, Any]]:
+        """Fetch a URL off the event loop and return status/text or None."""
+        try:
+            response = await asyncio.to_thread(requests.get, url, timeout=timeout)
+            return {"status": response.status_code, "text": response.text, "headers": response.headers}
+        except Exception as exc:
+            debug_logger.log_warning(
+                "element_cloner",
+                "_fetch_url_text",
+                f"Could not fetch {url}: {exc}",
+            )
+            return None
+
+    async def _fetch_asset_metadata(self, urls: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch asset URLs concurrently (off the event loop) and return metadata."""
+        if not urls:
+            return {}
+
+        async def fetch_one(url: str) -> tuple[str, Optional[Dict[str, Any]]]:
+            try:
+                response = await asyncio.to_thread(requests.get, url, timeout=5)
+                return url, {
+                    "content_type": response.headers.get("content-type"),
+                    "size": len(response.content),
+                    "status": response.status_code,
+                }
+            except Exception as exc:
+                debug_logger.log_warning(
+                    "element_cloner",
+                    "_fetch_asset_metadata",
+                    f"Could not fetch asset {url}: {exc}",
+                )
+                return url, None
+
+        results = await asyncio.gather(*(fetch_one(u) for u in urls))
+        return {url: meta for url, meta in results if meta is not None}
+
     async def _fetch_and_analyze_files(self, file_data: Dict, base_url: str, max_depth: int) -> None:
-        """
-        Fetch and analyze external CSS/JS files for additional context.
+        """Fetch external CSS/JS in parallel without blocking the event loop."""
 
-        Args:
-            file_data (Dict): Data structure containing file info
-            base_url (str): Base URL for resolving relative paths
-            max_depth (int): Maximum depth for following imports
+        async def process_stylesheet(stylesheet: Dict[str, Any]) -> None:
+            href = stylesheet.get('href')
+            if not href or href in self.extracted_files:
+                return
+            fetched = await self._fetch_url_text(href, timeout=10)
+            if not fetched or fetched["status"] != 200:
+                return
+            content = fetched["text"]
+            self.extracted_files[href] = content
+            imports = re.findall(r'@import\s+["\']([^"\']+)["\']', content)
+            stylesheet['imports'] = [urljoin(href, imp) for imp in imports]
+            stylesheet['custom_properties'] = re.findall(r'--[\w-]+:\s*[^;]+', content)
 
-        Returns:
-            None
-        """
-        for stylesheet in file_data['stylesheets']:
-            if stylesheet.get('href') and stylesheet['href'] not in self.extracted_files:
-                try:
-                    response = requests.get(stylesheet['href'], timeout=10)
-                    if response.status_code == 200:
-                        content = response.text
-                        self.extracted_files[stylesheet['href']] = content
-                        imports = re.findall(r'@import\s+["\']([^"\']+)["\']', content)
-                        stylesheet['imports'] = []
-                        for imp in imports:
-                            absolute_url = urljoin(stylesheet['href'], imp)
-                            stylesheet['imports'].append(absolute_url)
-                        css_vars = re.findall(r'--[\w-]+:\s*[^;]+', content)
-                        stylesheet['custom_properties'] = css_vars
-                except Exception as e:
-                    debug_logger.log_warning("element_cloner", "fetch_css", f"Could not fetch CSS file {stylesheet.get('href')}: {e}")
-        for script in file_data['scripts']:
-            if script.get('src') and script['src'] not in self.extracted_files:
-                try:
-                    response = requests.get(script['src'], timeout=10)
-                    if response.status_code == 200:
-                        content = response.text
-                        self.extracted_files[script['src']] = content
-                        script['detected_frameworks'] = []
-                        for framework, patterns in self.framework_patterns.items():
-                            for pattern in patterns:
-                                if re.search(pattern, content, re.IGNORECASE):
-                                    if framework not in script['detected_frameworks']:
-                                        script['detected_frameworks'].append(framework)
-                        imports = re.findall(r'import.*from\s+["\']([^"\']+)["\']', content)
-                        script['module_imports'] = imports
-                except Exception as e:
-                    debug_logger.log_warning("element_cloner", "fetch_js", f"Could not fetch JS file {script.get('src')}: {e}")
+        async def process_script(script: Dict[str, Any]) -> None:
+            src = script.get('src')
+            if not src or src in self.extracted_files:
+                return
+            fetched = await self._fetch_url_text(src, timeout=10)
+            if not fetched or fetched["status"] != 200:
+                return
+            content = fetched["text"]
+            self.extracted_files[src] = content
+            detected: List[str] = []
+            for framework, patterns in self.framework_patterns.items():
+                if any(re.search(p, content, re.IGNORECASE) for p in patterns):
+                    detected.append(framework)
+            script['detected_frameworks'] = detected
+            script['module_imports'] = re.findall(r'import.*from\s+["\']([^"\']+)["\']', content)
+
+        await asyncio.gather(
+            *(process_stylesheet(s) for s in file_data.get('stylesheets', [])),
+            *(process_script(s) for s in file_data.get('scripts', [])),
+        )
 
     async def clone_element_complete(
         self,

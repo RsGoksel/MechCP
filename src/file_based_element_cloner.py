@@ -17,6 +17,8 @@ sys.path.append(str(project_root))
 
 from comprehensive_element_cloner import ComprehensiveElementCloner
 from element_cloner import element_cloner
+from path_safety import safe_join, sanitize_filename
+
 
 class FileBasedElementCloner:
     """Element cloner that saves data to files and returns file paths."""
@@ -25,11 +27,18 @@ class FileBasedElementCloner:
         """
         Initialize with output directory for clone files.
 
+        The directory is resolved against the MECHCP sandbox; absolute or
+        traversal-style paths are stripped to a safe basename so callers
+        cannot redirect writes to arbitrary locations.
+
         Args:
-            output_dir (str): Directory to save clone files.
+            output_dir (str): Subdirectory within the sandbox to save clones.
         """
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True)
+        sub = sanitize_filename(output_dir, fallback="element_clones")
+        # safe_join returns a child path under the sandbox; we use that child
+        # itself as the cloner's output directory.
+        self.output_dir = safe_join(sub, create_parents=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         self.comprehensive_cloner = ComprehensiveElementCloner()
     
     def _safe_process_framework_handlers(self, framework_handlers):
@@ -120,19 +129,11 @@ class FileBasedElementCloner:
             return {"error": str(e)}
 
     def _save_to_file(self, data: Dict[str, Any], filename: str) -> str:
-        """
-        Save data to file and return absolute path.
-
-        Args:
-            data (Dict[str, Any]): Data to save.
-            filename (str): Name of the file.
-
-        Returns:
-            str: Absolute path to the saved file.
-        """
-        file_path = self.output_dir / filename
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        """Persist `data` as JSON inside the sandboxed output directory."""
+        safe_name = sanitize_filename(filename, fallback="clone.json")
+        file_path = self.output_dir / safe_name
+        with file_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, separators=(",", ":"), ensure_ascii=False, default=str)
         return str(file_path.absolute())
 
     async def extract_complete_element_to_file(
@@ -599,7 +600,7 @@ class FileBasedElementCloner:
                         data = json.load(f)
                         if '_metadata' in data:
                             file_info['metadata'] = data['_metadata']
-                except:
+                except Exception:
                     pass
                 files.append(file_info)
             except Exception as e:

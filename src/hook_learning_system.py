@@ -5,8 +5,9 @@ This system provides examples, documentation, and learning materials for AI
 to understand how to create effective hook functions.
 """
 
-from typing import Dict, List, Any
-import ast
+from typing import Any, Dict, List
+
+from safe_code import validate_code
 
 
 class HookLearningSystem:
@@ -250,13 +251,15 @@ def process_request(request):
                 },
                 "function": '''
 def process_request(request):
-    # Log important API calls for debugging
-    print(f"[API LOG] {request['method']} {request['url']}")
-    
-    # Log headers if they contain auth info
+    # Log important API calls for debugging via the sandboxed `log` helper.
+    log("[API LOG]", request["method"], request["url"])
+
+    # Note presence (not value) of an Authorization header. Never log header
+    # values directly: the debug logger redacts them, but printing values
+    # bypasses that and risks leaking credentials to the MCP transport.
     if "authorization" in str(request["headers"]).lower():
-        print(f"[API LOG] Has Authorization header")
-    
+        log("[API LOG] auth header present")
+
     # Always continue the request
     return HookAction(action="continue")
 ''',
@@ -510,56 +513,17 @@ def process_request(request):
     
     @staticmethod
     def validate_hook_function(function_code: str) -> Dict[str, Any]:
-        """Validate hook function code for common issues."""
-        issues = []
-        warnings = []
-        
-        try:
-            # Parse the function code
-            parsed = ast.parse(function_code)
-            
-            # Check for required function
-            has_process_request = False
-            for node in ast.walk(parsed):
-                if isinstance(node, ast.FunctionDef) and node.name == "process_request":
-                    has_process_request = True
-                    
-                    # Check function parameters
-                    if len(node.args.args) != 1:
-                        issues.append("process_request function must take exactly one parameter (request)")
-                    elif node.args.args[0].arg != "request":
-                        warnings.append("First parameter should be named 'request' for clarity")
-            
-            if not has_process_request:
-                issues.append("Function must define 'process_request(request)' function")
-            
-            # Check for dangerous operations
-            dangerous_nodes = []
-            for node in ast.walk(parsed):
-                if isinstance(node, ast.Import) or isinstance(node, ast.ImportFrom):
-                    warnings.append(f"Imports may not work in hook context: {ast.dump(node)}")
-                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                    if node.func.id in ['eval', 'exec', 'open', 'input']:
-                        issues.append(f"Dangerous function call: {node.func.id}")
-            
-            return {
-                "valid": len(issues) == 0,
-                "issues": issues,
-                "warnings": warnings
-            }
-            
-        except SyntaxError as e:
-            return {
-                "valid": False,
-                "issues": [f"Syntax error: {e}"],
-                "warnings": []
-            }
-        except Exception as e:
-            return {
-                "valid": False, 
-                "issues": [f"Parse error: {e}"],
-                "warnings": []
-            }
+        """Validate hook function code via the shared safe-code validator."""
+        result = validate_code(
+            function_code,
+            require_function="process_request",
+            expected_arity=1,
+        )
+        return {
+            "valid": result.valid,
+            "issues": result.issues,
+            "warnings": result.warnings,
+        }
 
 
 # Global instance

@@ -314,7 +314,7 @@ def process_request(request):
             elif action == "log":
                 function_code = '''
 def process_request(request):
-    print(f"[HOOK LOG] {request['method']} {request['url']}")
+    log("[HOOK LOG]", request["method"], request["url"])
     return HookAction(action="continue")
 '''
             else:

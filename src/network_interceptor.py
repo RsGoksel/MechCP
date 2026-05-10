@@ -2,23 +2,53 @@
 
 import asyncio
 import base64
+import os
+from collections import deque
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 import nodriver as uc
 from nodriver import Tab
 
+from debug_logger import debug_logger
 from models import NetworkRequest, NetworkResponse
 
 
-class NetworkInterceptor:
-    """Intercepts and manages network traffic for browser instances."""
+_DEFAULT_PER_INSTANCE_CAP = int(os.environ.get("MECHCP_NETWORK_MAX_REQUESTS", "5000"))
 
-    def __init__(self):
+
+class NetworkInterceptor:
+    """Intercept and store network traffic with bounded per-instance buffers.
+
+    Each browser instance keeps a FIFO deque of request IDs. Once the cap is
+    reached, the oldest entry is evicted from both the deque and the
+    request/response stores so long-running sessions cannot exhaust memory.
+    """
+
+    def __init__(self, max_requests_per_instance: int = _DEFAULT_PER_INSTANCE_CAP) -> None:
         self._requests: Dict[str, NetworkRequest] = {}
         self._responses: Dict[str, NetworkResponse] = {}
-        self._instance_requests: Dict[str, List[str]] = {}
+        self._instance_requests: Dict[str, Deque[str]] = {}
         self._lock = asyncio.Lock()
+        self._max_requests_per_instance = max(100, int(max_requests_per_instance))
+
+    def _instance_buffer(self, instance_id: str) -> Deque[str]:
+        """Return (and lazily create) the bounded request-id deque."""
+        buf = self._instance_requests.get(instance_id)
+        if buf is None:
+            buf = deque(maxlen=self._max_requests_per_instance)
+            self._instance_requests[instance_id] = buf
+        return buf
+
+    def _record_request(self, instance_id: str, request_id: str, request: NetworkRequest) -> None:
+        """Insert a request and evict the oldest if the cap is reached."""
+        buf = self._instance_buffer(instance_id)
+        if buf.maxlen and len(buf) == buf.maxlen:
+            evicted = buf[0]
+            self._requests.pop(evicted, None)
+            self._responses.pop(evicted, None)
+        buf.append(request_id)
+        self._requests[request_id] = request
 
     async def setup_interception(self, tab: Tab, instance_id: str, block_resources: List[str] = None):
         """
@@ -46,17 +76,29 @@ class NetworkInterceptor:
                     
                     if resource_type.lower() in resource_patterns:
                         url_patterns.extend(resource_patterns[resource_type.lower()])
-                        print(f"[DEBUG] Added URL patterns for {resource_type}: {resource_patterns[resource_type.lower()]}")
+                        debug_logger.log_info(
+                            "network_interceptor",
+                            "setup_interception",
+                            f"Added URL patterns for {resource_type}",
+                        )
                     else:
                         # Assume it's already a URL pattern
                         url_patterns.append(resource_type)
-                        print(f"[DEBUG] Added custom URL pattern: {resource_type}")
-                
+                        debug_logger.log_info(
+                            "network_interceptor",
+                            "setup_interception",
+                            f"Added custom URL pattern: {resource_type}",
+                        )
+
                 # Use network.set_blocked_ur_ls to block the URL patterns
                 if url_patterns:
                     await tab.send(uc.cdp.network.set_blocked_ur_ls(urls=url_patterns))
-                    print(f"[DEBUG] Blocked {len(url_patterns)} URL patterns: {url_patterns}")
-            
+                    debug_logger.log_info(
+                        "network_interceptor",
+                        "setup_interception",
+                        f"Blocked {len(url_patterns)} URL patterns",
+                    )
+
             tab.add_handler(
                 uc.cdp.network.RequestWillBeSent,
                 lambda event: asyncio.create_task(self._on_request(event, instance_id)),
@@ -65,13 +107,12 @@ class NetworkInterceptor:
                 uc.cdp.network.ResponseReceived,
                 lambda event: asyncio.create_task(self._on_response(event, instance_id)),
             )
-            
+
             async with self._lock:
-                if instance_id not in self._instance_requests:
-                    self._instance_requests[instance_id] = []
+                self._instance_buffer(instance_id)
         except Exception as e:
-            print(f"[DEBUG] Error in setup_interception: {e}")
-            raise Exception(f"Failed to setup network interception: {str(e)}")
+            debug_logger.log_error("network_interceptor", "setup_interception", e)
+            raise Exception(f"Failed to setup network interception: {str(e)}") from e
 
     async def _on_request(self, event, instance_id: str):
         """
@@ -101,10 +142,9 @@ class NetworkInterceptor:
                 resource_type=event.type if hasattr(event, "type") else None,
             )
             async with self._lock:
-                self._requests[request_id] = network_request
-                self._instance_requests[instance_id].append(request_id)
-        except Exception:
-            pass
+                self._record_request(instance_id, request_id, network_request)
+        except Exception as exc:
+            debug_logger.log_error("network_interceptor", "_on_request", exc)
 
     async def _on_response(self, event, instance_id: str):
         """
@@ -124,8 +164,8 @@ class NetworkInterceptor:
             )
             async with self._lock:
                 self._responses[request_id] = network_response
-        except Exception:
-            pass
+        except Exception as exc:
+            debug_logger.log_error("network_interceptor", "_on_response", exc)
 
 
     async def list_requests(self, instance_id: str, filter_type: Optional[str] = None) -> List[NetworkRequest]:
@@ -348,8 +388,8 @@ class NetworkInterceptor:
         instance_id: str - The browser instance identifier.
         """
         async with self._lock:
-            if instance_id in self._instance_requests:
-                for req_id in self._instance_requests[instance_id]:
+            buf = self._instance_requests.pop(instance_id, None)
+            if buf:
+                for req_id in buf:
                     self._requests.pop(req_id, None)
                     self._responses.pop(req_id, None)
-                del self._instance_requests[instance_id]

@@ -1,27 +1,42 @@
 """Browser instance management with nodriver."""
 
 import asyncio
+import os
 import uuid
-from typing import Dict, Optional, List
 from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 
 import nodriver as uc
 from nodriver import Browser, Tab
 
 from debug_logger import debug_logger
-from models import BrowserInstance, BrowserState, BrowserOptions, PageState
-from persistent_storage import persistent_storage
 from dynamic_hook_system import dynamic_hook_system
+from models import BrowserInstance, BrowserOptions, BrowserState, PageState
+from persistent_storage import persistent_storage
 from platform_utils import get_platform_info
 from process_cleanup import process_cleanup
 
 
-class BrowserManager:
-    """Manages multiple browser instances."""
+_DEFAULT_MAX_INSTANCES = int(os.environ.get("MECHCP_MAX_INSTANCES", "5"))
 
-    def __init__(self):
+
+class BrowserInstanceLimitError(RuntimeError):
+    """Raised when spawning a browser would exceed the configured cap."""
+
+
+class BrowserManager:
+    """Manage browser instances with a configurable concurrency cap.
+
+    The cap defaults to 5 and can be overridden via the
+    ``MECHCP_MAX_INSTANCES`` environment variable. The cap protects the host
+    from runaway loops or prompt injections that ask the agent to spawn
+    unbounded Chrome processes.
+    """
+
+    def __init__(self, max_instances: int = _DEFAULT_MAX_INSTANCES) -> None:
         self._instances: Dict[str, dict] = {}
         self._lock = asyncio.Lock()
+        self._max_instances = max(1, int(max_instances))
 
     async def spawn_browser(self, options: BrowserOptions) -> BrowserInstance:
         """
@@ -34,6 +49,14 @@ class BrowserManager:
             BrowserInstance: The spawned browser instance.
         """
         instance_id = str(uuid.uuid4())
+
+        async with self._lock:
+            active = len(self._instances)
+        if active >= self._max_instances:
+            raise BrowserInstanceLimitError(
+                f"Refusing to spawn: {active} of {self._max_instances} browser slots in use. "
+                "Close an instance or raise MECHCP_MAX_INSTANCES."
+            )
 
         instance = BrowserInstance(
             instance_id=instance_id,
@@ -77,11 +100,15 @@ class BrowserManager:
 
             await tab.set_window_size(
                 left=0,
-                top=0, 
+                top=0,
                 width=options.viewport_width,
-                height=options.viewport_height
+                height=options.viewport_height,
             )
-            print(f"[DEBUG] Set viewport to {options.viewport_width}x{options.viewport_height}")
+            debug_logger.log_info(
+                "browser_manager",
+                "spawn_browser",
+                f"Set viewport to {options.viewport_width}x{options.viewport_height}",
+            )
 
             await self._setup_dynamic_hooks(tab, instance_id)
 
