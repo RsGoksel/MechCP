@@ -22,6 +22,9 @@ ATTACKS = [
     "x.__globals__",
     "request.__class__.__mro__",
     "__import__('os')",
+    "(n := len(request))",
+    "__builtins__['exec']('print(1)')",
+    "x = __builtins__",
 ]
 
 

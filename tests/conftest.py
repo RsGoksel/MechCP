@@ -27,6 +27,12 @@ def _sandbox_env(tmp_path, monkeypatch):
 @pytest.fixture
 def src_on_path():
     """Some tests need src/ importable directly (server.py uses sibling imports)."""
+    inserted = False
     if str(SRC) not in sys.path:
         sys.path.insert(0, str(SRC))
-    yield
+        inserted = True
+    try:
+        yield
+    finally:
+        if inserted and str(SRC) in sys.path:
+            sys.path.remove(str(SRC))

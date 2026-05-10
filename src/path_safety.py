@@ -16,19 +16,15 @@ from pathlib import Path
 from typing import Iterable
 
 
-def _default_base_dir() -> Path:
-    """Read MECHCP_OUTPUT_DIR fresh on every call.
-
-    The environment variable is consulted per-invocation rather than cached at
-    import time so test fixtures (and operators who re-export the variable
-    after startup) see their changes take effect immediately.
-    """
-    return Path(os.environ.get("MECHCP_OUTPUT_DIR", "")).expanduser()
+def _default_base_dir() -> Path | None:
+    """Return the configured base dir from MECHCP_OUTPUT_DIR, or None if unset."""
+    raw = os.environ.get("MECHCP_OUTPUT_DIR", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
 
 
-# Backwards compatibility: some callers and tests imported the module-level
-# constant directly. We expose it as a module attribute that always reflects
-# the value at import time, but `_resolved_base` no longer relies on it.
+# Backwards-compat: kept for callers that expected this attribute to exist.
 DEFAULT_BASE_DIR = _default_base_dir()
 
 
@@ -38,7 +34,7 @@ def _resolved_base(base: Path | None) -> Path:
         target = Path(base).expanduser().resolve()
     else:
         configured = _default_base_dir()
-        if configured != Path(""):
+        if configured is not None:
             target = configured.resolve()
         else:
             target = Path(tempfile.gettempdir()).resolve() / "mechcp"

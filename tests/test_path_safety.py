@@ -41,3 +41,12 @@ def test_sanitize_filename_replaces_separators():
 
     assert sanitize_filename("../../foo/bar.txt") == "bar.txt"
     assert sanitize_filename("") == "output"
+
+
+def test_safe_join_falls_back_to_temp_when_env_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("MECHCP_OUTPUT_DIR", raising=False)
+    from path_safety import _resolved_base
+    base = _resolved_base(None)
+    # Must be inside the system temp dir, NOT the current working dir.
+    import tempfile
+    assert str(base).startswith(str(tempfile.gettempdir()))
