@@ -71,7 +71,7 @@ python src/server.py --minimal
 
 ## Operator Configuration (Environment Variables)
 
-The server reads four environment variables. All are optional with sensible defaults; set them in the `env` block of your MCP client configuration when you need to deviate.
+The server reads several optional environment variables. Set them in the `env` block of your MCP client configuration when you need to deviate from the defaults.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -80,7 +80,8 @@ The server reads four environment variables. All are optional with sensible defa
 | `MECHCP_LOG_MAX_ENTRIES` | `2000` | Maximum number of buffered log entries per level (errors / warnings / info). |
 | `MECHCP_LOG_LEVEL` | `WARNING` | Stderr log threshold (`DEBUG` / `INFO` / `WARNING` / `ERROR`). |
 | `MECHCP_OUTPUT_DIR` | system temp + `/mechcp` | Allowlisted root for tools that write files to disk (screenshots, debug exports, element clones). Paths supplied by the AI agent are resolved into this directory; absolute paths and traversal segments are stripped. |
-| `MECHCP_ALLOW_UNSAFE_CODE` | unset | Reserved future flag. Currently the AI-supplied Python paths (`create_dynamic_hook`, `create_python_binding`) always validate through `safe_code` regardless. |
+| `MECHCP_DISABLED_SECTIONS` | unset | Comma-separated list of MCP tool sections to disable at startup (e.g. `dynamic-hooks,cdp-functions`). Equivalent to passing `--disable-<section>` flags. Run with `--list-sections` to see the available section names. |
+| `MECHCP_ALLOW_UNSAFE_CODE` | `0` | When set to `1`/`true`/`yes`, signals operator opt-in for code paths that compile AI-supplied Python. **Note:** the AST validator in `src/safe_code.py` always runs regardless of this flag — the flag exists so future relaxations of the sandbox can require explicit operator consent. Leaving it unset is the safe default. |
 
 ## Security Notes
 
