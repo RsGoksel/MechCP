@@ -17,13 +17,16 @@ import nodriver as uc
 from fastmcp import FastMCP
 
 from browser_manager import BrowserManager
-from cdp_element_cloner import CDPElementCloner
 from cdp_function_executor import CDPFunctionExecutor
-from comprehensive_element_cloner import comprehensive_element_cloner
+from cloner import (
+    CDPElementCloner,
+    comprehensive_element_cloner,
+    element_cloner,
+    file_based_element_cloner,
+    progressive_element_cloner,
+)
 from debug_logger import debug_logger
 from dom_handler import DOMHandler
-from element_cloner import element_cloner
-from file_based_element_cloner import file_based_element_cloner
 from models import (
     BrowserOptions,
     NavigationOptions,
@@ -35,10 +38,11 @@ from network_interceptor import NetworkInterceptor
 from dynamic_hook_system import dynamic_hook_system
 from dynamic_hook_ai_interface import dynamic_hook_ai
 from persistent_storage import persistent_storage
-from progressive_element_cloner import progressive_element_cloner
 from response_handler import response_handler
 from platform_utils import validate_browser_environment, get_platform_info
 from process_cleanup import process_cleanup
+from path_safety import safe_join, sanitize_filename
+from safe_code import safe_compile
 
 DISABLED_SECTIONS = set()
 
@@ -171,11 +175,12 @@ async def spawn_browser(
         instance = await browser_manager.spawn_browser(options)
         tab = await browser_manager.get_tab(instance.instance_id)
         if tab:
+            # The dynamic hook interception is already wired up by
+            # BrowserManager._setup_dynamic_hooks during spawn_browser; here we
+            # only need to enable Network domain capture for the inspector.
             await network_interceptor.setup_interception(
                 tab, instance.instance_id, block_resources
             )
-            await dynamic_hook_system.setup_interception(tab, instance.instance_id)
-            dynamic_hook_system.add_instance(instance.instance_id)
         return {
             "instance_id": instance.instance_id,
             "state": instance.state,
@@ -245,7 +250,7 @@ async def get_instance_state(instance_id: str) -> Optional[Dict[str, Any]]:
     """
     state = await browser_manager.get_page_state(instance_id)
     if state:
-        return state.dict()
+        return state.model_dump()
     return None
 
 @section_tool("browser-management")
@@ -381,10 +386,7 @@ async def query_elements(
     result = []
     for i, elem in enumerate(elements):
         try:
-            if hasattr(elem, 'model_dump'):
-                elem_dict = elem.model_dump()
-            else:
-                elem_dict = elem.dict()
+            elem_dict = elem.model_dump() if hasattr(elem, 'model_dump') else dict(elem)
             result.append(elem_dict)
             debug_logger.log_info('Server', 'query_elements', f'Converted element {i+1} to dict: {list(elem_dict.keys())}')
         except Exception as e:
@@ -669,8 +671,10 @@ async def take_screenshot(
         raise Exception(f"Instance not found: {instance_id}")
     
     if file_path:
-        save_path = Path(file_path)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            save_path = safe_join(file_path, allowed_suffixes={".png", ".jpg", ".jpeg"})
+        except ValueError as exc:
+            return {"success": False, "error": f"unsafe file_path rejected: {exc}"}
         await tab.save_screenshot(save_path)
         return f"Screenshot saved. AI agents should use the Read tool to view this image: {str(save_path.absolute())}"
     
@@ -770,7 +774,7 @@ async def get_request_details(
     """
     request = await network_interceptor.get_request(request_id)
     if request:
-        return request.dict()
+        return request.model_dump()
     return None
 
 
@@ -789,7 +793,7 @@ async def get_response_details(
     """
     response = await network_interceptor.get_response(request_id)
     if response:
-        return response.dict()
+        return response.model_dump()
     return None
 
 
@@ -953,7 +957,7 @@ async def get_browser_state_resource(instance_id: str) -> str:
     """
     state = await browser_manager.get_page_state(instance_id)
     if state:
-        return json.dumps(state.dict(), indent=2)
+        return json.dumps(state.model_dump(), indent=2, default=str)
     return json.dumps({"error": "Instance not found"})
 
 
@@ -987,7 +991,7 @@ async def get_network_resource(instance_id: str) -> str:
         str: JSON string of network requests.
     """
     requests = await network_interceptor.list_requests(instance_id)
-    return json.dumps([req.dict() for req in requests], indent=2)
+    return json.dumps([req.model_dump() for req in requests], indent=2, default=str)
 
 
 @mcp.resource("browser://{instance_id}/console")
@@ -1065,16 +1069,14 @@ async def export_debug_logs(
     Export debug logs to a file using the fastest available method with timeout protection.
 
     Args:
-        filename (str): Name of the file to export to.
+        filename (str): Bare filename inside the MECHCP_OUTPUT_DIR sandbox.
+            Path separators are stripped and the file must end with ``.json``.
         max_errors (int): Maximum number of errors to export (default: 100).
         max_warnings (int): Maximum number of warnings to export (default: 100).
         max_info (int): Maximum number of info logs to export (default: 100).
         include_all (bool): Include all logs regardless of limits (default: False).
-        format (str): Export format: 'json', 'pickle', 'gzip-pickle', 'auto' (default: 'auto').
-                     'auto' chooses fastest format based on data size:
-                     - Small data (<100 items): JSON (human readable)
-                     - Medium data (100-1000 items): Pickle (fast binary)
-                     - Large data (>1000 items): Gzip-Pickle (fastest, compressed)
+        format (str): Only ``json`` is supported; pickle exports were removed
+            because pickle deserialization is a code-execution sink.
 
     Returns:
         str: Path to the exported file.
@@ -1087,13 +1089,15 @@ async def export_debug_logs(
                 max_errors if not include_all else None,
                 max_warnings if not include_all else None,
                 max_info if not include_all else None,
-                format
+                format,
             ),
-            timeout=30.0
+            timeout=30.0,
         )
         return filepath
+    except ValueError as exc:
+        return f"unsafe filename rejected: {exc}"
     except asyncio.TimeoutError:
-        return f"Export timeout - file too large. Try with smaller limits or 'gzip-pickle' format."
+        return "Export timeout - file too large. Try with smaller limits."
 
 
 @section_tool("debugging")
@@ -2392,16 +2396,26 @@ async def create_python_binding(
     if not tab:
         return {"success": False, "error": f"Instance not found: {instance_id}"}
     try:
-        exec_globals = {}
-        exec(python_code, exec_globals)
-        python_function = None
-        for name, obj in exec_globals.items():
-            if callable(obj) and not name.startswith('_'):
-                python_function = obj
-                break
+        exec_globals = safe_compile(
+            python_code,
+            filename=f"<binding:{binding_name}>",
+        )
+        python_function = next(
+            (
+                obj
+                for name, obj in exec_globals.items()
+                if callable(obj) and not name.startswith("_") and name != "HookAction"
+            ),
+            None,
+        )
         if not python_function:
-            return {"success": False, "error": "No function found in Python code"}
+            return {"success": False, "error": "No callable function defined in python_code"}
         return await cdp_function_executor.create_python_binding(tab, binding_name, python_function)
+    except PermissionError as e:
+        return {
+            "success": False,
+            "error": f"python_code rejected by safe-code validator: {e}",
+        }
     except Exception as e:
         return {"success": False, "error": f"Failed to create Python function: {str(e)}"}
 
@@ -2707,7 +2721,8 @@ if __name__ == "__main__":
         DISABLED_SECTIONS.add("dynamic-hooks")
     
     if DISABLED_SECTIONS:
-        print(f"Disabled tool sections: {', '.join(sorted(DISABLED_SECTIONS))}")
+        # Stdio transports use stdout for JSON-RPC framing; banners go to stderr.
+        print(f"Disabled tool sections: {', '.join(sorted(DISABLED_SECTIONS))}", file=sys.stderr)
     
     if args.transport == "http":
         mcp.run(transport="http", host=args.host, port=args.port)
