@@ -156,11 +156,36 @@ def register(mcp: FastMCP) -> None:
     async def remove_dynamic_hook(hook_id: str) -> Dict[str, Any]:
         """
         Remove a dynamic hook.
-        
+
         Args:
             hook_id (str): Hook identifier to remove
-            
+
         Returns:
             Dict[str, Any]: Removal status
         """
         return await dynamic_hook_ai.remove_dynamic_hook(hook_id=hook_id)
+
+    @section_tool(mcp, "dynamic-hooks")
+    def get_hook_documentation() -> Dict[str, Any]:
+        """Get comprehensive documentation for creating hook functions (AI learning)."""
+        return dynamic_hook_ai.get_request_documentation()
+
+    @section_tool(mcp, "dynamic-hooks")
+    def get_hook_examples() -> Dict[str, Any]:
+        """Get example hook functions for AI learning."""
+        return dynamic_hook_ai.get_hook_examples()
+
+    @section_tool(mcp, "dynamic-hooks")
+    def get_hook_requirements_documentation() -> Dict[str, Any]:
+        """Get documentation on hook requirements and matching criteria."""
+        return dynamic_hook_ai.get_requirements_documentation()
+
+    @section_tool(mcp, "dynamic-hooks")
+    def get_hook_common_patterns() -> Dict[str, Any]:
+        """Get common hook patterns and use cases."""
+        return dynamic_hook_ai.get_common_patterns()
+
+    @section_tool(mcp, "dynamic-hooks")
+    def validate_hook_function(function_code: str) -> Dict[str, Any]:
+        """Validate hook function code for common issues before creating."""
+        return dynamic_hook_ai.validate_hook_function(function_code=function_code)
