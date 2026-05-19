@@ -3,7 +3,8 @@
 import asyncio
 import base64
 import os
-from collections import deque
+import time
+from collections import defaultdict, deque
 from datetime import datetime
 from typing import Any, Deque, Dict, FrozenSet, List, Optional
 
@@ -40,6 +41,41 @@ class NetworkInterceptor:
         self._instance_requests: Dict[str, Deque[str]] = {}
         self._lock = asyncio.Lock()
         self._max_requests_per_instance = max(100, int(max_requests_per_instance))
+        self._in_flight: Dict[str, int] = defaultdict(int)
+        self._last_change: Dict[str, float] = defaultdict(time.monotonic)
+
+    def _inc_in_flight(self, instance_id: str) -> None:
+        self._in_flight[instance_id] += 1
+        self._last_change[instance_id] = time.monotonic()
+
+    def _dec_in_flight(self, instance_id: str) -> None:
+        if self._in_flight[instance_id] > 0:
+            self._in_flight[instance_id] -= 1
+        self._last_change[instance_id] = time.monotonic()
+
+    def in_flight_count(self, instance_id: str) -> int:
+        return self._in_flight[instance_id]
+
+    async def wait_for_idle(
+        self,
+        instance_id: str,
+        idle_ms: int = 500,
+        timeout_ms: int = 10000,
+    ) -> bool:
+        """Block until ``in_flight_count == 0`` has held for ``idle_ms`` ms.
+
+        Returns True when settled, False on timeout. ``idle_ms`` defines the
+        debounce window so a single momentary zero does not declare success.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        idle_s = idle_ms / 1000.0
+        poll = max(0.025, idle_s / 5)
+        while time.monotonic() < deadline:
+            if self._in_flight[instance_id] == 0:
+                if time.monotonic() - self._last_change[instance_id] >= idle_s:
+                    return True
+            await asyncio.sleep(poll)
+        return False
 
     def _instance_buffer(self, instance_id: str) -> Deque[str]:
         """Return (and lazily create) the bounded request-id deque."""
@@ -117,6 +153,25 @@ class NetworkInterceptor:
                 lambda event: asyncio.create_task(self._on_response(event, instance_id)),
             )
 
+            # Terminal events that drive the in-flight counter for the
+            # wait_for_idle helper. Decrementing on these (not on
+            # ResponseReceived) avoids double-counting since ResponseReceived
+            # fires when headers arrive, before the body completes.
+            def _on_loading_finished(event):
+                try:
+                    self._dec_in_flight(instance_id)
+                except Exception:
+                    pass
+
+            def _on_loading_failed(event):
+                try:
+                    self._dec_in_flight(instance_id)
+                except Exception:
+                    pass
+
+            tab.add_handler(uc.cdp.network.LoadingFinished, _on_loading_finished)
+            tab.add_handler(uc.cdp.network.LoadingFailed, _on_loading_failed)
+
             async with self._lock:
                 self._instance_buffer(instance_id)
         except Exception as e:
@@ -133,6 +188,11 @@ class NetworkInterceptor:
         try:
             request_id = event.request_id
             request = event.request
+
+            # Track in-flight for wait_for_idle. We increment even on filtered
+            # captures so the counter reflects real network activity, not just
+            # what we store.
+            self._inc_in_flight(instance_id)
 
             # Default-filter noisy resource types unless the operator explicitly
             # opts in to capture everything.

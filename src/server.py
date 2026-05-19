@@ -278,7 +278,10 @@ async def navigate(
     Args:
         instance_id (str): Browser instance ID.
         url (str): URL to navigate to.
-        wait_until (str): Wait condition - 'load', 'domcontentloaded', or 'networkidle'.
+        wait_until (str): Wait condition. 'load' (default) waits for the
+            window onload event. 'domcontentloaded' waits for the DOM ready
+            event. 'networkidle' waits for load + a 500ms quiet window with
+            zero in-flight requests, bounded by the navigation timeout.
         timeout (int): Navigation timeout in milliseconds.
         referrer (Optional[str]): Referrer URL.
 
@@ -299,7 +302,16 @@ async def navigate(
         if wait_until == "domcontentloaded":
             await tab.wait(uc.cdp.page.DomContentEventFired)
         elif wait_until == "networkidle":
-            await asyncio.sleep(2)
+            await tab.wait(uc.cdp.page.LoadEventFired)
+            settled = await network_interceptor.wait_for_idle(
+                instance_id, idle_ms=500, timeout_ms=max(2000, timeout - 1000)
+            )
+            if not settled:
+                debug_logger.log_warning(
+                    "server",
+                    "navigate",
+                    f"network never reached idle within timeout for {url}",
+                )
         else:
             await tab.wait(uc.cdp.page.LoadEventFired)
         final_url = await tab.evaluate("window.location.href")
