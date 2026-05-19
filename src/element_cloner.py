@@ -347,7 +347,7 @@ class ElementCloner:
                     for bg in asset_data.get('background_images', [])
                     if bg.get('url', '').startswith('http')
                 ]
-                asset_data['external_assets'] = await self._fetch_asset_metadata(bg_urls)
+                asset_data['external_assets'] = await self._fetch_asset_metadata(bg_urls, tab=tab)
             
             debug_logger.log_info("element_cloner", "extract_assets", f"Extracted assets for element")
             return asset_data
@@ -403,7 +403,7 @@ class ElementCloner:
                 return {"error": f"Unexpected return type: {type(file_data)}", "raw_data": str(file_data)}
             
             if follow_imports and max_depth > 0 and isinstance(file_data, dict):
-                await self._fetch_and_analyze_files(file_data, tab.url, max_depth)
+                await self._fetch_and_analyze_files(file_data, tab.url, max_depth, tab=tab)
             
             debug_logger.log_info("element_cloner", "extract_related_files", f"Found related files")
             return file_data
@@ -411,51 +411,100 @@ class ElementCloner:
             debug_logger.log_error("element_cloner", "extract_related_files", e)
             return {"error": str(e)}
 
-    async def _fetch_url_text(self, url: str, timeout: int = 10) -> Optional[Dict[str, Any]]:
-        """Fetch a URL off the event loop and return status/text or None."""
+    async def _fetch_via_tab(self, tab, url: str, timeout: float = 10.0) -> Optional[Dict[str, Any]]:
+        """Fetch ``url`` inside the page context so the origin sees the page's TLS fingerprint.
+
+        Returns ``{status, text, headers}`` on success, None on failure. Used to
+        avoid having two separate JA3 signatures (Chrome + Python ``requests``)
+        hitting the same origin from the same client, which is trivially
+        correlatable by anti-bot systems.
+        """
+        if not tab:
+            return None
+        js = (
+            "(async () => {"
+            "  const r = await fetch(%s, {credentials: 'include', mode: 'cors'});"
+            "  const text = await r.text();"
+            "  const headers = {};"
+            "  r.headers.forEach((v, k) => { headers[k] = v; });"
+            "  return {status: r.status, text, headers};"
+            "})()"
+        ) % json.dumps(url)
+        try:
+            return await asyncio.wait_for(tab.evaluate(js, await_promise=True), timeout=timeout)
+        except Exception as exc:
+            debug_logger.log_warning(
+                "element_cloner",
+                "_fetch_via_tab",
+                f"page-context fetch failed for {url}: {exc}",
+            )
+            return None
+
+    async def _fetch_url_text(self, url: str, timeout: int = 10, tab=None) -> Optional[Dict[str, Any]]:
+        """Fetch a URL and return status/text/headers.
+
+        Prefers the in-page ``fetch`` (so JA3 / cookies match the current
+        browsing session). Falls back to Python's ``requests`` if the tab
+        rejects the script (e.g. CSP). The fallback is async-safe.
+        """
+        if tab is not None:
+            result = await self._fetch_via_tab(tab, url, timeout=float(timeout))
+            if result is not None:
+                return result
         try:
             response = await asyncio.to_thread(requests.get, url, timeout=timeout)
-            return {"status": response.status_code, "text": response.text, "headers": response.headers}
+            return {"status": response.status_code, "text": response.text, "headers": dict(response.headers)}
         except Exception as exc:
             debug_logger.log_warning(
                 "element_cloner",
                 "_fetch_url_text",
-                f"Could not fetch {url}: {exc}",
+                f"could not fetch {url}: {exc}",
             )
             return None
 
-    async def _fetch_asset_metadata(self, urls: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Fetch asset URLs concurrently (off the event loop) and return metadata."""
+    async def _fetch_asset_metadata(self, urls: List[str], tab=None) -> Dict[str, Dict[str, Any]]:
+        """Fetch asset URLs concurrently. Prefers in-page fetch for stealth."""
         if not urls:
             return {}
 
+        sem = asyncio.Semaphore(8)
+
         async def fetch_one(url: str) -> tuple[str, Optional[Dict[str, Any]]]:
-            try:
-                response = await asyncio.to_thread(requests.get, url, timeout=5)
-                return url, {
-                    "content_type": response.headers.get("content-type"),
-                    "size": len(response.content),
-                    "status": response.status_code,
-                }
-            except Exception as exc:
-                debug_logger.log_warning(
-                    "element_cloner",
-                    "_fetch_asset_metadata",
-                    f"Could not fetch asset {url}: {exc}",
-                )
-                return url, None
+            async with sem:
+                if tab is not None:
+                    result = await self._fetch_via_tab(tab, url, timeout=5.0)
+                    if result is not None:
+                        return url, {
+                            "content_type": (result.get("headers") or {}).get("content-type"),
+                            "size": len(result.get("text", "")),
+                            "status": result.get("status"),
+                        }
+                try:
+                    response = await asyncio.to_thread(requests.get, url, timeout=5)
+                    return url, {
+                        "content_type": response.headers.get("content-type"),
+                        "size": len(response.content),
+                        "status": response.status_code,
+                    }
+                except Exception as exc:
+                    debug_logger.log_warning(
+                        "element_cloner",
+                        "_fetch_asset_metadata",
+                        f"could not fetch asset {url}: {exc}",
+                    )
+                    return url, None
 
         results = await asyncio.gather(*(fetch_one(u) for u in urls))
         return {url: meta for url, meta in results if meta is not None}
 
-    async def _fetch_and_analyze_files(self, file_data: Dict, base_url: str, max_depth: int) -> None:
+    async def _fetch_and_analyze_files(self, file_data: Dict, base_url: str, max_depth: int, tab=None) -> None:
         """Fetch external CSS/JS in parallel without blocking the event loop."""
 
         async def process_stylesheet(stylesheet: Dict[str, Any]) -> None:
             href = stylesheet.get('href')
             if not href or href in self.extracted_files:
                 return
-            fetched = await self._fetch_url_text(href, timeout=10)
+            fetched = await self._fetch_url_text(href, timeout=10, tab=tab)
             if not fetched or fetched["status"] != 200:
                 return
             content = fetched["text"]
@@ -468,7 +517,7 @@ class ElementCloner:
             src = script.get('src')
             if not src or src in self.extracted_files:
                 return
-            fetched = await self._fetch_url_text(src, timeout=10)
+            fetched = await self._fetch_url_text(src, timeout=10, tab=tab)
             if not fetched or fetched["status"] != 200:
                 return
             content = fetched["text"]
