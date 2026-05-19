@@ -325,18 +325,48 @@ class NetworkInterceptor:
             raise Exception(f"Failed to modify headers: {str(e)}")
 
     async def set_user_agent(self, tab: Tab, user_agent: str):
-        """
-        Set custom user agent.
+        """Set custom user agent and matching Sec-CH-UA client hints.
 
-        tab: Tab - The browser tab.
-        user_agent: str - The user agent string to set.
-        Returns: bool - True if successful.
+        Pairs the override with parsed userAgentMetadata so the spoofed UA
+        does not collide with real client-hint values, which is otherwise a
+        high-signal bot fingerprint.
         """
+        from stealth_scripts import parse_user_agent_metadata
+
         try:
+            meta = parse_user_agent_metadata(user_agent)
+            if meta is not None:
+                try:
+                    metadata = uc.cdp.emulation.UserAgentMetadata(
+                        platform=meta["platform"],
+                        platform_version=meta["platform_version"],
+                        architecture=meta["architecture"],
+                        bitness=meta["bitness"],
+                        model=meta["model"],
+                        mobile=meta["mobile"],
+                        brands=[
+                            uc.cdp.emulation.UserAgentBrandVersion(
+                                brand=b["brand"], version=b["version"]
+                            )
+                            for b in meta["brands"]
+                        ],
+                    )
+                    await tab.send(
+                        uc.cdp.emulation.set_user_agent_override(
+                            user_agent=user_agent, user_agent_metadata=metadata
+                        )
+                    )
+                    return True
+                except Exception as exc:
+                    debug_logger.log_warning(
+                        "network_interceptor",
+                        "set_user_agent",
+                        f"client-hints metadata build failed, falling back to UA-only: {exc}",
+                    )
             await tab.send(uc.cdp.network.set_user_agent_override(user_agent=user_agent))
             return True
         except Exception as e:
-            raise Exception(f"Failed to set user agent: {str(e)}")
+            raise Exception(f"Failed to set user agent: {str(e)}") from e
 
     async def enable_cache(self, tab: Tab, enabled: bool = True):
         """

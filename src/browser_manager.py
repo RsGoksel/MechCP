@@ -15,7 +15,12 @@ from models import BrowserInstance, BrowserOptions, BrowserState, PageState
 from persistent_storage import persistent_storage
 from platform_utils import get_platform_info
 from process_cleanup import process_cleanup
-from stealth_scripts import DEFAULT_STEALTH_ARGS, STEALTH_INIT_JS, pick_realistic_viewport
+from stealth_scripts import (
+    DEFAULT_STEALTH_ARGS,
+    STEALTH_INIT_JS,
+    parse_user_agent_metadata,
+    pick_realistic_viewport,
+)
 
 
 _DEFAULT_MAX_INSTANCES = int(os.environ.get("MECHCP_MAX_INSTANCES", "5"))
@@ -117,9 +122,41 @@ class BrowserManager:
                 )
 
             if options.user_agent:
-                await tab.send(uc.cdp.emulation.set_user_agent_override(
-                    user_agent=options.user_agent
-                ))
+                try:
+                    meta = parse_user_agent_metadata(options.user_agent)
+                except Exception as exc:
+                    debug_logger.log_warning(
+                        "browser_manager",
+                        "spawn_browser",
+                        f"could not parse UA for client-hints: {exc}",
+                    )
+                    meta = None
+
+                kwargs = {"user_agent": options.user_agent}
+                if meta is not None:
+                    try:
+                        kwargs["user_agent_metadata"] = uc.cdp.emulation.UserAgentMetadata(
+                            platform=meta["platform"],
+                            platform_version=meta["platform_version"],
+                            architecture=meta["architecture"],
+                            bitness=meta["bitness"],
+                            model=meta["model"],
+                            mobile=meta["mobile"],
+                            brands=[
+                                uc.cdp.emulation.UserAgentBrandVersion(
+                                    brand=b["brand"], version=b["version"]
+                                )
+                                for b in meta["brands"]
+                            ],
+                        )
+                    except Exception as exc:
+                        debug_logger.log_warning(
+                            "browser_manager",
+                            "spawn_browser",
+                            f"could not build UserAgentMetadata (falling back to UA-only): {exc}",
+                        )
+                        kwargs.pop("user_agent_metadata", None)
+                await tab.send(uc.cdp.emulation.set_user_agent_override(**kwargs))
 
             if options.extra_headers:
                 await tab.send(uc.cdp.network.set_extra_http_headers(

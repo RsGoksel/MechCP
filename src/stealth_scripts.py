@@ -21,7 +21,8 @@ signature (1920x1080 with devicePixelRatio=1).
 from __future__ import annotations
 
 import random
-from typing import Tuple
+import re
+from typing import Optional, Tuple
 
 # Weighted from public StatCounter desktop viewport stats; intentionally avoids
 # pure 1920x1080 dominance so two MechCP instances do not look identical.
@@ -153,3 +154,66 @@ DEFAULT_STEALTH_ARGS: Tuple[str, ...] = (
     "--password-store=basic",
     "--use-mock-keychain",
 )
+
+
+_UA_PLATFORM_PATTERNS = [
+    (re.compile(r"\bWindows NT 11\.0"), ("Windows", "11")),
+    (re.compile(r"\bWindows NT 10\.0"), ("Windows", "10")),
+    (re.compile(r"\bWindows NT 6\.3"), ("Windows", "8.1")),
+    (re.compile(r"\bAndroid (\d+)"), ("Android", None)),
+    (re.compile(r"\bMac OS X (\d+)[_.](\d+)"), ("macOS", None)),
+    (re.compile(r"\bCrOS\b"), ("Chrome OS", "")),
+    (re.compile(r"\bLinux\b"), ("Linux", "")),
+]
+
+_UA_CHROME_VERSION = re.compile(r"Chrome/(\d+)\.")
+
+
+def parse_user_agent_metadata(ua: str) -> Optional[dict]:
+    """Return a Chrome-compatible userAgentMetadata dict matching ``ua``.
+
+    Returns ``None`` when the UA is not recognized as a Chromium browser, so
+    callers do NOT override metadata and the real client-hint values continue
+    to ship. A spoofed UA with mismatched metadata is the single highest-signal
+    bot fingerprint, so the parser is intentionally conservative.
+    """
+    if not ua or "Chrome/" not in ua:
+        return None
+
+    chrome_match = _UA_CHROME_VERSION.search(ua)
+    if not chrome_match:
+        return None
+    major = chrome_match.group(1)
+
+    platform = "Unknown"
+    platform_version = ""
+    for pattern, (plat, default_ver) in _UA_PLATFORM_PATTERNS:
+        m = pattern.search(ua)
+        if m:
+            platform = plat
+            if plat == "macOS" and m.lastindex and m.lastindex >= 2:
+                platform_version = f"{m.group(1)}.{m.group(2)}"
+            elif plat == "Android" and m.lastindex:
+                platform_version = m.group(1)
+            else:
+                platform_version = default_ver or ""
+            break
+
+    mobile = "Mobile" in ua or platform == "Android"
+    arch_l = ua.lower()
+    architecture = "arm" if ("arm" in arch_l or platform == "Android") else "x86"
+    bitness = "64" if any(t in ua for t in ("WOW64", "Win64", "x64", "x86_64")) else "32"
+
+    return {
+        "platform": platform,
+        "platform_version": platform_version,
+        "architecture": architecture,
+        "bitness": bitness,
+        "model": "",
+        "mobile": mobile,
+        "brands": [
+            {"brand": "Not/A)Brand", "version": "99"},
+            {"brand": "Google Chrome", "version": major},
+            {"brand": "Chromium", "version": major},
+        ],
+    }
