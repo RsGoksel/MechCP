@@ -427,6 +427,34 @@ class DOMHandler:
             if not element:
                 raise Exception(f"Element not found: {selector}")
 
+            # Move the pointer toward the input on a jittered Bezier before
+            # focusing. A focus-without-pointer-trajectory is the same
+            # fingerprint surface as a click without one. Best-effort.
+            try:
+                from stealth_scripts import bezier_path
+                from nodriver import cdp as _cdp
+                import json as _json
+
+                box = await tab.evaluate(
+                    f"(() => {{ const el = document.querySelector({_json.dumps(selector)});"
+                    " if (!el) return null;"
+                    " const r = el.getBoundingClientRect();"
+                    " return {x: r.x + r.width/2, y: r.y + r.height/2}; }})()"
+                )
+                if isinstance(box, dict) and "x" in box and "y" in box:
+                    start = (max(0.0, float(box["x"]) - 160.0), max(0.0, float(box["y"]) - 60.0))
+                    for x, y, dwell in bezier_path(start, (float(box["x"]), float(box["y"])), steps=8):
+                        await tab.send(_cdp.input_.dispatch_mouse_event(
+                            type_="mouseMoved", x=x, y=y, button="none",
+                        ))
+                        await asyncio.sleep(dwell)
+            except Exception as exc:
+                debug_logger.log_warning(
+                    "dom_handler",
+                    "type_text",
+                    f"mouse trajectory before focus failed (continuing): {exc}",
+                )
+
             await element.focus()
             await asyncio.sleep(0.1)
 
