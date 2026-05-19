@@ -217,3 +217,35 @@ def parse_user_agent_metadata(ua: str) -> Optional[dict]:
             {"brand": "Chromium", "version": major},
         ],
     }
+
+
+def bezier_path(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    *,
+    steps: int = 12,
+    jitter: float = 18.0,
+    rng: random.Random | None = None,
+) -> list:
+    """Return a list of ``(x, y, dwell_seconds)`` along a jittered cubic Bezier.
+
+    ``dwell_seconds`` is a small Gaussian-jittered pause between hops so the
+    overall trajectory has organic variance instead of a constant frame rate.
+    Used to send `Input.dispatchMouseEvent(mouseMoved, ...)` along the path
+    before a click, defeating the simplest "click without trajectory" detector.
+    """
+    r = rng or random
+    cx1 = start[0] + (end[0] - start[0]) * 0.33 + r.uniform(-jitter, jitter)
+    cy1 = start[1] + (end[1] - start[1]) * 0.33 + r.uniform(-jitter, jitter)
+    cx2 = start[0] + (end[0] - start[0]) * 0.66 + r.uniform(-jitter, jitter)
+    cy2 = start[1] + (end[1] - start[1]) * 0.66 + r.uniform(-jitter, jitter)
+
+    path = []
+    for i in range(1, steps + 1):
+        t = i / steps
+        mt = 1.0 - t
+        x = (mt ** 3) * start[0] + 3 * (mt ** 2) * t * cx1 + 3 * mt * (t ** 2) * cx2 + (t ** 3) * end[0]
+        y = (mt ** 3) * start[1] + 3 * (mt ** 2) * t * cy1 + 3 * mt * (t ** 2) * cy2 + (t ** 3) * end[1]
+        dwell = max(0.005, r.gauss(0.018, 0.006))
+        path.append((x, y, dwell))
+    return path

@@ -215,6 +215,42 @@ class DOMHandler:
 
             await element.scroll_into_view()
             await asyncio.sleep(0.2)
+
+            # Send a short jittered mouse trajectory toward the target before
+            # the actual click. Pure CDP center-point clicks with no pointer
+            # history are a high-signal "no human input" pattern.
+            try:
+                from stealth_scripts import bezier_path
+                from nodriver import cdp as _cdp
+                import json as _json
+
+                target_query = selector if selector else None
+                if target_query:
+                    box = await tab.evaluate(
+                        f"(() => {{ const el = document.querySelector({_json.dumps(target_query)});"
+                        " if (!el) return null;"
+                        " const r = el.getBoundingClientRect();"
+                        " return {x: r.x + r.width/2, y: r.y + r.height/2}; }})()"
+                    )
+                    if isinstance(box, dict) and "x" in box and "y" in box:
+                        start = (
+                            max(0.0, float(box["x"]) - 200.0),
+                            max(0.0, float(box["y"]) - 80.0),
+                        )
+                        for x, y, dwell in bezier_path(start, (float(box["x"]), float(box["y"]))):
+                            await tab.send(
+                                _cdp.input_.dispatch_mouse_event(
+                                    type_="mouseMoved", x=x, y=y, button="none",
+                                )
+                            )
+                            await asyncio.sleep(dwell)
+            except Exception as exc:
+                debug_logger.log_warning(
+                    "dom_handler",
+                    "click_element",
+                    f"mouse trajectory failed (continuing with direct click): {exc}",
+                )
+
             try:
                 await element.click()
             except Exception:
