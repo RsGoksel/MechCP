@@ -20,10 +20,25 @@ from typing import Iterable
 
 from fastmcp import FastMCP
 
-from . import browser, debugging, network, storage, tabs
+from . import (
+    browser,
+    cdp,
+    debugging,
+    elements,
+    extraction,
+    file_extraction,
+    hooks,
+    network,
+    progressive,
+    storage,
+    tabs,
+)
 from ._helpers import disable_sections
 
-_MODULES = [browser, debugging, network, storage, tabs]
+_MODULES = [
+    browser, cdp, debugging, elements, extraction, file_extraction,
+    hooks, network, progressive, storage, tabs,
+]
 
 
 def register_all(mcp: FastMCP, disabled: Iterable[str] = ()) -> None:
