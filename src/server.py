@@ -487,11 +487,34 @@ async def query_shadow(
 
 
 @section_tool("element-interaction")
+async def list_frames(instance_id: str) -> List[Dict[str, Any]]:
+    """Enumerate child iframes in the current page.
+
+    Most modern login forms, payment widgets, and reCAPTCHA challenges live
+    inside iframes that ``query_elements`` cannot enter. Use this to discover
+    the available frames. Per-frame interaction routing is still scaffolding
+    today (the ``frame_id`` argument on click/type/wait returns an explicit
+    "not yet supported" error); use this tool to inspect iframe URLs and
+    surface them to the user instead.
+
+    Args:
+        instance_id (str): Browser instance ID.
+
+    Returns:
+        List[Dict[str, Any]]: ``[{frame_id, url, name, parent_frame_id}]``.
+        Empty list when the page has no iframes or the instance is missing.
+    """
+    tab = await browser_manager.get_tab(instance_id)
+    return await dom_handler.list_frames(tab)
+
+
+@section_tool("element-interaction")
 async def click_element(
     instance_id: str,
     selector: str,
     text_match: Optional[str] = None,
-    timeout: int = 10000
+    timeout: int = 10000,
+    frame_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Click an element and return a post-state verification report.
 
@@ -500,6 +523,10 @@ async def click_element(
         selector (str): CSS selector or XPath of the element.
         text_match (Optional[str]): Click element with matching text instead.
         timeout (int): Timeout in milliseconds for element resolution.
+        frame_id (Optional[str]): If set, target the iframe with this frame_id
+            (from ``list_frames``). When omitted, targets the top-level
+            document. Per-frame routing is a scaffolding stub today; passing
+            a frame_id returns an explicit "not yet supported" error.
 
     Returns:
         Dict[str, Any]: ``{success, navigated, dom_mutated, url_before,
@@ -517,7 +544,19 @@ async def click_element(
             "dom_mutated": False,
             "error": f"Instance not found: {instance_id}",
         }
-    return await dom_handler.click_element(tab, selector, text_match, timeout)
+    resolved = await dom_handler._resolve_frame_tab(tab, frame_id=frame_id)
+    if resolved is None:
+        return {
+            "success": False,
+            "navigated": False,
+            "dom_mutated": False,
+            "error": (
+                f"frame_id={frame_id!r} routing not yet supported; "
+                "use list_frames to inspect iframes and call on the top-level "
+                "document with frame_id=None"
+            ),
+        }
+    return await dom_handler.click_element(resolved, selector, text_match, timeout)
 
 @section_tool("element-interaction")
 async def type_text(
@@ -527,10 +566,10 @@ async def type_text(
     clear_first: bool = True,
     delay_ms: int = 50,
     parse_newlines: bool = False,
-    shift_enter: bool = False
+    shift_enter: bool = False,
+    frame_id: Optional[str] = None,
 ) -> bool:
-    """
-    Type text into an input field.
+    """Type text into an input field.
 
     Args:
         instance_id (str): Browser instance ID.
@@ -540,6 +579,9 @@ async def type_text(
         delay_ms (int): Delay between keystrokes in milliseconds.
         parse_newlines (bool): If True, parse \n as Enter key presses.
         shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).
+        frame_id (Optional[str]): If set, target the iframe with this
+            frame_id. Per-frame routing is a scaffolding stub today; passing
+            a frame_id raises an explicit error.
 
     Returns:
         bool: True if typed successfully.
@@ -549,7 +591,13 @@ async def type_text(
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.type_text(tab, selector, text, clear_first, delay_ms, parse_newlines, shift_enter)
+    resolved = await dom_handler._resolve_frame_tab(tab, frame_id=frame_id)
+    if resolved is None:
+        raise Exception(
+            f"frame_id={frame_id!r} routing not yet supported; "
+            "use list_frames to inspect iframes and call without frame_id"
+        )
+    return await dom_handler.type_text(resolved, selector, text, clear_first, delay_ms, parse_newlines, shift_enter)
 
 @section_tool("element-interaction")
 async def paste_text(
@@ -635,10 +683,10 @@ async def wait_for_element(
     selector: str,
     timeout: int = 30000,
     visible: bool = True,
-    text_content: Optional[str] = None
-) -> bool:
-    """
-    Wait for an element to appear.
+    text_content: Optional[str] = None,
+    frame_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Wait for an element to appear (and optionally become visible / contain text).
 
     Args:
         instance_id (str): Browser instance ID.
@@ -646,16 +694,26 @@ async def wait_for_element(
         timeout (int): Timeout in milliseconds.
         visible (bool): Wait for element to be visible.
         text_content (Optional[str]): Wait for specific text content.
+        frame_id (Optional[str]): If set, target the iframe with this
+            frame_id. Per-frame routing is a scaffolding stub today; passing
+            a frame_id raises an explicit error.
 
     Returns:
-        bool: True if element found.
+        Optional[Dict[str, Any]]: Snapshot ``{tag, id, classes, text, box}``
+        when matched, ``None`` on timeout.
     """
     if isinstance(timeout, str):
         timeout = int(timeout)
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
-    return await dom_handler.wait_for_element(tab, selector, timeout, visible, text_content)
+    resolved = await dom_handler._resolve_frame_tab(tab, frame_id=frame_id)
+    if resolved is None:
+        raise Exception(
+            f"frame_id={frame_id!r} routing not yet supported; "
+            "use list_frames to inspect iframes and call without frame_id"
+        )
+    return await dom_handler.wait_for_element(resolved, selector, timeout, visible, text_content)
 
 @section_tool("element-interaction")
 async def scroll_page(

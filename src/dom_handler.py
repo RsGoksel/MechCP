@@ -163,6 +163,67 @@ class DOMHandler:
             return []
 
     @staticmethod
+    async def list_frames(tab: Optional[Tab]) -> List[Dict[str, Any]]:
+        """Enumerate iframes in the page with stable frame IDs.
+
+        Returns ``[{frame_id, url, name, parent_frame_id}]`` for each iframe
+        the page has loaded. ``frame_id`` is the CDP frame ID. Currently the
+        per-frame interaction routing is a stub (see ``_resolve_frame_tab``),
+        but the enumeration tool ships now so agents can at least discover
+        iframe URLs and make routing decisions in their prompts.
+
+        Returns ``[]`` when the tab is missing or the page has no iframes.
+        """
+        if tab is None:
+            return []
+        try:
+            tree = await tab.send(uc.cdp.page.get_frame_tree())
+        except Exception:
+            return []
+
+        out: List[Dict[str, Any]] = []
+
+        def walk(node, parent_id):
+            try:
+                frame = node.frame
+                out.append({
+                    "frame_id": str(frame.id_),
+                    "url": getattr(frame, "url", "") or "",
+                    "name": getattr(frame, "name", None),
+                    "parent_frame_id": parent_id,
+                })
+                for child in (getattr(node, "child_frames", None) or []):
+                    walk(child, str(frame.id_))
+            except Exception:
+                pass
+
+        try:
+            walk(tree, parent_id=None)
+        except Exception:
+            return []
+        # Drop the root frame (only iframes are interesting to the agent).
+        return [f for f in out if f["parent_frame_id"] is not None]
+
+    @staticmethod
+    async def _resolve_frame_tab(tab, frame_id: Optional[str]):
+        """Return the target tab for the requested frame, or None if unsupported.
+
+        - ``frame_id is None`` returns the input tab unchanged (top-level
+          targeting, the existing behavior).
+        - ``frame_id`` set but ``tab is None`` returns None.
+        - ``frame_id`` set on a live tab also returns None today: nodriver
+          does not expose per-frame Tab objects, so we cannot route a click
+          into an iframe without a richer abstraction. Returning None here
+          (rather than silently using the main tab) lets the MCP wrapper
+          surface an explicit "not yet supported" error to the agent.
+
+        Future improvement: use ``Target.attachToTarget`` for OOPIFs.
+        """
+        if frame_id is None:
+            return tab
+        return None
+
+    @staticmethod
     async def query_shadow(
         tab: Optional[Tab],
         selector: str,
