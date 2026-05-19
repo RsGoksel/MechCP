@@ -25,11 +25,31 @@ dom_handler = DOMHandler()
 cdp_function_executor = CDPFunctionExecutor()
 element_cloner = unified_cloner
 
-_DISABLED: Set[str] = {
-    s.strip()
-    for s in os.environ.get("MECHCP_DISABLED_SECTIONS", "").split(",")
-    if s.strip()
+_MINIMAL_DISABLED = {
+    "element-extraction", "file-extraction", "network-debugging",
+    "cdp-functions", "progressive-cloning", "cookies-storage",
+    "tabs", "debugging", "dynamic-hooks",
 }
+
+
+def _initial_disabled() -> Set[str]:
+    """Compute initial disabled set from env vars at module-import time.
+
+    Honors both ``MECHCP_DISABLED_SECTIONS`` (explicit list) and
+    ``MECHCP_MINIMAL`` (preset that disables every section except
+    browser-management and element-interaction).
+    """
+    sections: Set[str] = {
+        s.strip()
+        for s in os.environ.get("MECHCP_DISABLED_SECTIONS", "").split(",")
+        if s.strip()
+    }
+    if os.environ.get("MECHCP_MINIMAL", "").strip().lower() in {"1", "true", "yes"}:
+        sections.update(_MINIMAL_DISABLED)
+    return sections
+
+
+_DISABLED: Set[str] = _initial_disabled()
 
 
 def is_section_enabled(section: str) -> bool:
