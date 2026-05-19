@@ -178,6 +178,7 @@ class BrowserManager:
             )
 
             await self._setup_dynamic_hooks(tab, instance_id)
+            await self._setup_console_capture(tab, instance_id)
 
             async with self._lock:
                 self._instances[instance_id] = {
@@ -185,7 +186,8 @@ class BrowserManager:
                     'tab': tab,
                     'instance': instance,
                     'options': options,
-                    'network_data': []
+                    'network_data': [],
+                    'console_logs': getattr(tab, '_mechcp_console_buf', []),
                 }
 
             instance.state = BrowserState.READY
@@ -204,6 +206,59 @@ class BrowserManager:
 
         return instance
     
+    async def _setup_console_capture(self, tab: Tab, instance_id: str) -> None:
+        """Capture page console messages into the per-instance buffer.
+
+        The buffer is exposed to MCP clients via the ``get_console_logs`` tool.
+        Bounded to 500 entries; older entries are evicted FIFO.
+        """
+        buf: List[Dict[str, Any]] = []
+        async with self._lock:
+            inst = self._instances.get(instance_id)
+            if inst is not None:
+                inst.setdefault("console_logs", buf)
+                buf = inst["console_logs"]
+            else:
+                # Instance dict is built after this method returns; store the
+                # list reference now and the caller will pick it up via the
+                # closure below.
+                pass
+
+        def _on_console(event):
+            try:
+                args = getattr(event, "args", None) or []
+                pieces = []
+                for a in args:
+                    val = getattr(a, "value", None)
+                    if val is None:
+                        val = getattr(a, "description", None)
+                    pieces.append(str(val) if val is not None else "")
+                buf.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "level": str(getattr(event, "type_", "log")),
+                    "text": " ".join(pieces),
+                })
+                if len(buf) > 500:
+                    del buf[: len(buf) - 500]
+            except Exception:
+                pass
+
+        try:
+            await tab.send(uc.cdp.runtime.enable())
+            tab.add_handler(uc.cdp.runtime.ConsoleAPICalled, _on_console)
+            # Stash the buffer on a tab-level attribute so the post-spawn
+            # _instances dict picks it up.
+            try:
+                setattr(tab, "_mechcp_console_buf", buf)
+            except Exception:
+                pass
+        except Exception as exc:
+            debug_logger.log_warning(
+                "browser_manager",
+                "_setup_console_capture",
+                f"console capture failed: {exc}",
+            )
+
     async def _setup_dynamic_hooks(self, tab: Tab, instance_id: str):
         """Setup dynamic hook system for browser instance."""
         try:

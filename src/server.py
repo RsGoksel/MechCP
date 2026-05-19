@@ -899,6 +899,118 @@ async def take_screenshot(
             os.unlink(tmp_path)
 
 
+@section_tool("element-interaction")
+async def screenshot_element(
+    instance_id: str,
+    selector: str,
+    padding_px: int = 8,
+    file_path: Optional[str] = None,
+) -> Union[str, Dict[str, Any]]:
+    """Screenshot a single element instead of the whole viewport.
+
+    Cheaper than ``take_screenshot`` for UI-state verification (often
+    ~10x fewer bytes to look at) since it crops to the element's bounding
+    box plus a small padding margin.
+
+    Args:
+        instance_id (str): Browser instance ID.
+        selector (str): CSS selector of the target element.
+        padding_px (int): Pixels of margin around the element in the capture.
+        file_path (Optional[str]): If provided, write the PNG to this path
+            (resolved inside the MECHCP_OUTPUT_DIR sandbox). Returns the
+            resolved path string. Otherwise returns base64-encoded PNG.
+
+    Returns:
+        Union[str, Dict[str, Any]]: Path string or base64 data on success;
+        ``{success: False, error}`` on failure.
+    """
+    import base64 as _b64
+
+    tab = await browser_manager.get_tab(instance_id)
+    if not tab:
+        return {"success": False, "error": f"Instance not found: {instance_id}"}
+
+    js = (
+        "(() => { const el = document.querySelector(%s);"
+        " if (!el) return null;"
+        " const r = el.getBoundingClientRect();"
+        " return {x: r.x, y: r.y, width: r.width, height: r.height,"
+        " dpr: window.devicePixelRatio || 1}; })()"
+    ) % json.dumps(selector)
+    try:
+        box = await tab.evaluate(js)
+    except Exception as exc:
+        return {"success": False, "error": f"could not locate element: {exc}"}
+    if not isinstance(box, dict):
+        return {"success": False, "error": f"element not found: {selector}"}
+
+    pad = max(0, int(padding_px))
+    try:
+        clip = uc.cdp.page.Viewport(
+            x=max(0.0, float(box["x"]) - pad),
+            y=max(0.0, float(box["y"]) - pad),
+            width=float(box["width"]) + 2 * pad,
+            height=float(box["height"]) + 2 * pad,
+            scale=1.0,
+        )
+        png_b64 = await tab.send(
+            uc.cdp.page.capture_screenshot(format_="png", clip=clip)
+        )
+    except Exception as exc:
+        return {"success": False, "error": f"capture_screenshot failed: {exc}"}
+
+    if isinstance(png_b64, tuple):
+        png_b64 = png_b64[0]
+    if not isinstance(png_b64, str):
+        return {"success": False, "error": "capture_screenshot returned no data"}
+
+    if file_path:
+        try:
+            target = safe_join(file_path, allowed_suffixes={".png"})
+        except ValueError as exc:
+            return {"success": False, "error": f"unsafe file_path rejected: {exc}"}
+        target.write_bytes(_b64.b64decode(png_b64))
+        return str(target)
+    return png_b64
+
+
+@section_tool("debugging")
+async def get_console_logs(
+    instance_id: str,
+    since_index: int = 0,
+    level_filter: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return browser console messages captured since spawn.
+
+    Args:
+        instance_id (str): Browser instance ID.
+        since_index (int): Return entries at index >= this value. The agent
+            can poll incrementally by passing the previous ``next_index``.
+        level_filter (Optional[str]): If set, only return entries whose level
+            matches (e.g. 'error', 'warning').
+
+    Returns:
+        Dict[str, Any]: ``{instance_id, total, returned, next_index, entries}``.
+    """
+    async with browser_manager._lock:
+        inst = browser_manager._instances.get(instance_id)
+        if inst is None:
+            return {"error": f"Instance not found: {instance_id}"}
+        logs = list(inst.get("console_logs", []))
+
+    if level_filter:
+        logs = [e for e in logs if str(e.get("level", "")).lower() == level_filter.lower()]
+    slice_start = max(0, int(since_index))
+    entries = logs[slice_start:]
+    return {
+        "instance_id": instance_id,
+        "total": len(logs),
+        "returned": len(entries),
+        "next_index": len(logs),
+        "entries": entries[-200:],
+    }
+
+
 @section_tool("network-debugging")
 async def list_network_requests(
     instance_id: str,
