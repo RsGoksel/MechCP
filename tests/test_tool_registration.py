@@ -27,7 +27,13 @@ EXPECTED_TOOLS = {
 
 @pytest.fixture(autouse=True)
 def _add_src(src_on_path):
-    sys.modules.pop("server", None)
+    # Drop server AND every cached tools/* module so register_all rebuilds
+    # against a fresh FastMCP. Other tests reload server with disabled
+    # sections; without this pop the leftover _DISABLED state would
+    # incorrectly hide tools from THIS test.
+    for name in list(sys.modules):
+        if name == "server" or name == "tools" or name.startswith("tools."):
+            sys.modules.pop(name, None)
     yield
 
 
