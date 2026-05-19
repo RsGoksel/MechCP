@@ -306,7 +306,10 @@ async def navigate(
             event. 'networkidle' waits for load + a 500ms quiet window with
             zero in-flight requests, bounded by the navigation timeout.
         timeout (int): Navigation timeout in milliseconds.
-        referrer (Optional[str]): Referrer URL.
+        referrer (Optional[str]): If set, attaches as the navigation Referer
+            so the target sees Sec-Fetch-Site: same-origin / cross-site
+            instead of the "no-history" pattern that flags as direct-bot
+            traffic.
 
     Returns:
         Dict[str, Any]: Navigation result with final URL and title.
@@ -318,10 +321,20 @@ async def navigate(
         raise Exception(f"Instance not found: {instance_id}")
     try:
         if referrer:
-            await tab.send(uc.cdp.page.set_referrer_policy(
-                referrerPolicy='origin-when-cross-origin'
-            ))
-        await tab.get(url)
+            try:
+                await tab.send(uc.cdp.page.navigate(url=url, referrer=referrer))
+            except Exception as exc:
+                debug_logger.log_warning(
+                    "server",
+                    "navigate",
+                    f"page.navigate with referrer failed, falling back: {exc}",
+                )
+                await tab.send(uc.cdp.network.set_extra_http_headers(
+                    headers={"Referer": referrer}
+                ))
+                await tab.get(url)
+        else:
+            await tab.get(url)
         if wait_until == "domcontentloaded":
             await tab.wait(uc.cdp.page.DomContentEventFired)
         elif wait_until == "networkidle":
