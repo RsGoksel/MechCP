@@ -167,43 +167,90 @@ class DOMHandler:
         tab: Tab,
         selector: str,
         text_match: Optional[str] = None,
-        timeout: int = 10000
-    ) -> bool:
-        """
-        Click an element with smart retry logic.
+        timeout: int = 10000,
+    ) -> Dict[str, Any]:
+        """Click an element and return a post-state verification report.
 
         Args:
             tab (Tab): The browser tab object.
             selector (str): CSS selector for the element.
-            text_match (Optional[str]): Match element by text content.
-            timeout (int): Timeout in milliseconds.
+            text_match (Optional[str]): Match element by text content instead.
+            timeout (int): Timeout in milliseconds for element resolution.
 
         Returns:
-            bool: True if click succeeded, False otherwise.
+            Dict[str, Any]: ``{success, navigated, dom_mutated, url_before,
+            url_after, outer_html_hash_before, outer_html_hash_after, error}``.
+            ``navigated``/``dom_mutated`` are how the caller verifies the click
+            actually had an effect, vs. silently hitting a covering overlay.
         """
-        try:
-            element = None
+        import hashlib as _hashlib
 
+        def _hash_dom(html: str) -> str:
+            return _hashlib.blake2b(html.encode("utf-8", "ignore"), digest_size=8).hexdigest()
+
+        try:
+            url_before = getattr(tab, "url", "") or ""
+            try:
+                outer_before = await tab.evaluate(
+                    "document.documentElement.outerHTML.slice(0, 200000)"
+                )
+                outer_before = outer_before if isinstance(outer_before, str) else ""
+            except Exception:
+                outer_before = ""
+            hash_before = _hash_dom(outer_before)
+
+            element = None
             if text_match:
                 element = await tab.find(text_match, best_match=True)
             else:
-                element = await tab.select(selector, timeout=timeout/1000)
+                element = await tab.select(selector, timeout=timeout / 1000)
 
             if not element:
-                raise Exception(f"Element not found: {selector}")
+                return {
+                    "success": False,
+                    "navigated": False,
+                    "dom_mutated": False,
+                    "error": f"Element not found: {selector}",
+                }
 
             await element.scroll_into_view()
-            await asyncio.sleep(0.5)
-
+            await asyncio.sleep(0.2)
             try:
                 await element.click()
             except Exception:
                 await element.mouse_click()
+            await asyncio.sleep(0.4)
 
-            return True
+            try:
+                url_after = await tab.evaluate("window.location.href")
+            except Exception:
+                url_after = None
+            try:
+                outer_after = await tab.evaluate(
+                    "document.documentElement.outerHTML.slice(0, 200000)"
+                )
+                outer_after = outer_after if isinstance(outer_after, str) else ""
+            except Exception:
+                outer_after = ""
+            hash_after = _hash_dom(outer_after)
 
+            return {
+                "success": True,
+                "navigated": isinstance(url_after, str) and url_after != url_before,
+                "dom_mutated": hash_after != hash_before,
+                "url_before": url_before,
+                "url_after": url_after if isinstance(url_after, str) else None,
+                "outer_html_hash_before": hash_before,
+                "outer_html_hash_after": hash_after,
+                "error": None,
+            }
         except Exception as e:
-            raise Exception(f"Failed to click element: {str(e)}")
+            return {
+                "success": False,
+                "navigated": False,
+                "dom_mutated": False,
+                "error": str(e),
+            }
 
     @staticmethod
     async def type_text(

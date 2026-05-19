@@ -459,24 +459,31 @@ async def click_element(
     selector: str,
     text_match: Optional[str] = None,
     timeout: int = 10000
-) -> bool:
-    """
-    Click an element.
+) -> Dict[str, Any]:
+    """Click an element and return a post-state verification report.
 
     Args:
         instance_id (str): Browser instance ID.
-        selector (str): CSS selector or XPath.
-        text_match (Optional[str]): Click element with matching text.
-        timeout (int): Timeout in milliseconds.
+        selector (str): CSS selector or XPath of the element.
+        text_match (Optional[str]): Click element with matching text instead.
+        timeout (int): Timeout in milliseconds for element resolution.
 
     Returns:
-        bool: True if clicked successfully.
+        Dict[str, Any]: ``{success, navigated, dom_mutated, url_before,
+        url_after, error}``. ``success`` means the click was dispatched;
+        ``navigated`` and ``dom_mutated`` show whether anything actually
+        changed (the click may have hit an overlay).
     """
     if isinstance(timeout, str):
         timeout = int(timeout)
     tab = await browser_manager.get_tab(instance_id)
     if not tab:
-        raise Exception(f"Instance not found: {instance_id}")
+        return {
+            "success": False,
+            "navigated": False,
+            "dom_mutated": False,
+            "error": f"Instance not found: {instance_id}",
+        }
     return await dom_handler.click_element(tab, selector, text_match, timeout)
 
 @section_tool("element-interaction")
