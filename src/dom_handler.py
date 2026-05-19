@@ -163,6 +163,45 @@ class DOMHandler:
             return []
 
     @staticmethod
+    async def query_shadow(
+        tab: Optional[Tab],
+        selector: str,
+        max_results: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Find elements that match ``selector`` anywhere in the document, piercing open shadow roots.
+
+        Returns a list of element snapshots (``tag, id, classes, text, attrs,
+        box, shadow_path``). ``shadow_path`` is the list of host-tag names that
+        led into the shadow root containing the element, so the agent can tell
+        whether the element is inside ``<youtube-search>`` versus
+        ``<github-app>``.
+
+        Returns ``[]`` when ``tab`` is None or the underlying evaluate fails,
+        so the caller can fall back to ``query_elements`` without try/except.
+        """
+        import json as _json
+        from pathlib import Path as _Path
+
+        if tab is None:
+            return []
+
+        js_path = _Path(__file__).parent / "js" / "query_deep.js"
+        if not js_path.exists():
+            return []
+
+        template = js_path.read_text(encoding="utf-8")
+        js = template.replace("$SELECTOR", _json.dumps(selector))
+        js = js.replace("$LIMIT", str(max(1, int(max_results))))
+
+        try:
+            result = await tab.evaluate(js)
+        except Exception:
+            return []
+        if not isinstance(result, list):
+            return []
+        return result
+
+    @staticmethod
     async def click_element(
         tab: Tab,
         selector: str,

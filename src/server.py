@@ -457,6 +457,35 @@ async def query_elements(
     debug_logger.log_info('Server', 'query_elements', f'Returning {len(result)} results to MCP client')
     return result if result else []
 
+
+@section_tool("element-interaction")
+async def query_shadow(
+    instance_id: str,
+    selector: str,
+    max_results: int = 50,
+) -> List[Dict[str, Any]]:
+    """Find elements that match a CSS selector, piercing open Shadow DOM.
+
+    Stencil, Lit, Polymer, and modern Web Components (YouTube new UI, parts
+    of GitHub, Chrome DevTools) hide their content inside open shadow roots
+    that ``query_elements`` cannot see. Use this tool when ``query_elements``
+    returns 0 results on a page that visibly contains the element.
+
+    Args:
+        instance_id (str): Browser instance ID.
+        selector (str): CSS selector (e.g. ``"button.submit"``).
+        max_results (int): Cap on returned matches (default 50).
+
+    Returns:
+        List[Dict[str, Any]]: Element snapshots with a ``shadow_path`` field
+        that names the host-tag chain leading into the shadow root.
+    """
+    tab = await browser_manager.get_tab(instance_id)
+    if tab is None:
+        return []
+    return await dom_handler.query_shadow(tab, selector, max_results=max_results)
+
+
 @section_tool("element-interaction")
 async def click_element(
     instance_id: str,
