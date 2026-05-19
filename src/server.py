@@ -175,7 +175,11 @@ async def spawn_browser(
         viewport_width (int): Viewport width in pixels.
         viewport_height (int): Viewport height in pixels.
         proxy (Optional[str]): Proxy server URL.
-        block_resources (List[str]): List of resource types to block (e.g., ['image', 'font', 'stylesheet']).
+        block_resources (List[str]): Resource types or URL patterns to block.
+            DO NOT block image/font/stylesheet on stealth-sensitive
+            navigation: zero image bytes per page is itself a strong bot
+            signal. Prefer specific URL patterns (e.g.
+            ['*googletagmanager.com*']) over coarse resource-type bans.
         extra_headers (Dict[str, str]): Additional HTTP headers.
         user_data_dir (Optional[str]): Path to user data directory for persistent sessions.
         sandbox (Optional[Any]): Enable browser sandbox. Accepts bool, string ('true'/'false'), int (1/0), or None for auto-detect.

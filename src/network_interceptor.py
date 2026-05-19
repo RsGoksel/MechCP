@@ -107,6 +107,15 @@ class NetworkInterceptor:
             await tab.send(uc.cdp.network.enable())
             
             if block_resources:
+                _NOISY_STEALTH = {"image", "font", "stylesheet"}
+                noisy = [r for r in block_resources if str(r).lower() in _NOISY_STEALTH]
+                if noisy:
+                    debug_logger.log_warning(
+                        "network_interceptor",
+                        "setup_interception",
+                        f"blocking {noisy} is a strong bot fingerprint; prefer URL patterns",
+                    )
+
                 # Convert resource types to URL patterns for blocking
                 url_patterns = []
                 for resource_type in block_resources:
