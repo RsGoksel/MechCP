@@ -703,12 +703,116 @@ async def get_page_content(
     if not tab:
         raise Exception(f"Instance not found: {instance_id}")
     content = await dom_handler.get_page_content(tab, include_frames)
-    
+
     return response_handler.handle_response(
-        content, 
-        "page_content", 
+        content,
+        "page_content",
         {"instance_id": instance_id, "include_frames": include_frames}
     )
+
+
+@section_tool("element-interaction")
+async def get_visible_text(
+    instance_id: str,
+    max_chars: int = 4000,
+) -> Dict[str, Any]:
+    """Return the page's visible innerText, truncated to ``max_chars``.
+
+    Cheap alternative to ``get_page_content`` (which dumps full HTML) and to
+    ``take_screenshot`` (which costs tokens to look at). Use this when the
+    agent only needs to know "what does the page say".
+
+    Args:
+        instance_id (str): Browser instance ID.
+        max_chars (int): Hard cap on returned text length (default 4000).
+
+    Returns:
+        Dict[str, Any]: ``{url, title, text, truncated, total_length}``.
+    """
+    tab = await browser_manager.get_tab(instance_id)
+    if not tab:
+        return {"url": "", "title": "", "text": "", "truncated": False,
+                "error": f"Instance not found: {instance_id}"}
+    try:
+        url = getattr(tab, "url", "")
+        title = await tab.evaluate("document.title")
+        text = await tab.evaluate(
+            "document.body && document.body.innerText ? document.body.innerText : ''"
+        )
+        if not isinstance(text, str):
+            text = ""
+        truncated = len(text) > max_chars
+        return {
+            "url": url,
+            "title": title if isinstance(title, str) else "",
+            "text": text[:max_chars],
+            "truncated": truncated,
+            "total_length": len(text),
+        }
+    except Exception as e:
+        return {"url": "", "title": "", "text": "", "truncated": False, "error": str(e)}
+
+
+@section_tool("element-interaction")
+async def get_page_outline(
+    instance_id: str,
+) -> Dict[str, Any]:
+    """Return a compact outline of headings, landmarks, forms, buttons and links.
+
+    Designed for an agent that needs to navigate or summarize without dumping
+    the entire DOM. Returns at most ~200 items across all categories.
+
+    Args:
+        instance_id (str): Browser instance ID.
+
+    Returns:
+        Dict[str, Any]: ``{url, title, headings, landmarks, forms, buttons, links}``.
+    """
+    tab = await browser_manager.get_tab(instance_id)
+    if not tab:
+        return {"error": f"Instance not found: {instance_id}"}
+    js = """(() => {
+      const lim = (arr, n) => arr.slice(0, n);
+      const txt = (el) => ((el.innerText || el.textContent || '').trim().slice(0, 120));
+      const headings = lim(
+        [...document.querySelectorAll('h1, h2, h3, h4, h5, h6')]
+          .filter(h => txt(h))
+          .map(h => ({level: parseInt(h.tagName[1]), text: txt(h)})),
+        80,
+      );
+      const landmarks = lim(
+        [...document.querySelectorAll('main, nav, header, footer, aside, [role=main], [role=navigation], [role=banner]')]
+          .map(el => ({tag: el.tagName.toLowerCase(), role: el.getAttribute('role') || null, label: el.getAttribute('aria-label') || null, id: el.id || null})),
+        30,
+      );
+      const forms = lim(
+        [...document.querySelectorAll('form')]
+          .map(f => ({action: f.getAttribute('action') || null, method: (f.getAttribute('method') || 'get').toLowerCase(), id: f.id || null, fields: [...f.querySelectorAll('input, select, textarea')].slice(0, 20).map(i => ({name: i.name || null, type: i.type || i.tagName.toLowerCase(), required: i.required, label: (i.labels && i.labels[0] && txt(i.labels[0])) || null}))})),
+        15,
+      );
+      const buttons = lim(
+        [...document.querySelectorAll('button, [role=button], input[type=submit], input[type=button]')]
+          .map(b => ({text: txt(b) || b.value || null, id: b.id || null, disabled: b.disabled || false})),
+        40,
+      );
+      const links = lim(
+        [...document.querySelectorAll('a[href]')]
+          .filter(a => txt(a))
+          .map(a => ({text: txt(a), href: a.href})),
+        50,
+      );
+      return {
+        url: window.location.href,
+        title: document.title,
+        headings, landmarks, forms, buttons, links,
+      };
+    })()"""
+    try:
+        result = await tab.evaluate(js)
+        return result if isinstance(result, dict) else {"error": "evaluate returned non-dict"}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 @section_tool("element-interaction")
 async def take_screenshot(
