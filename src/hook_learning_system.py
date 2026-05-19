@@ -45,15 +45,15 @@ class HookLearningSystem:
                         "type": "dict[str, str]",
                         "description": "Request headers as key-value pairs",
                         "example": {
-                            "User-Agent": "Mozilla/5.0...",
+                            "User-Agent": "<browser-ua-string>",
                             "Accept": "application/json",
-                            "Authorization": "Bearer token123"
-                        }
+                            "Authorization": "Bearer <REDACTED>",
+                        },
                     },
                     "post_data": {
                         "type": "str or None",
                         "description": "POST/PUT body data (None for GET requests)",
-                        "example": '{"username": "user", "password": "pass"}'
+                        "example": '{"field": "<value>"}',
                     },
                     "resource_type": {
                         "type": "str or None",
@@ -136,11 +136,13 @@ def process_request(request):
                 },
                 "function": '''
 def process_request(request):
-    # Add API key header to all API requests
+    # Add custom API headers. NEVER hardcode real keys in hook source: the
+    # hook is stored in plaintext on the server and visible to anyone with
+    # debug access. Read from an env var or operator-supplied requirement.
     new_headers = request["headers"].copy()
-    new_headers["X-API-Key"] = "secret-api-key-123"
+    new_headers["X-API-Key"] = "<api-key-placeholder>"
     new_headers["X-Custom-Client"] = "Browser-Hook-System"
-    
+
     return HookAction(
         action="modify",
         headers=new_headers
