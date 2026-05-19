@@ -2396,13 +2396,31 @@ async def create_dynamic_hook(
             return HookAction(action="continue")
         ```
     """
-    return await dynamic_hook_ai.create_dynamic_hook(
+    result = await dynamic_hook_ai.create_dynamic_hook(
         name=name,
         requirements=requirements,
         function_code=function_code,
         instance_ids=instance_ids,
         priority=priority
     )
+
+    # Lazy Fetch.enable: when the first hook lands on an instance, the
+    # interception was deferred at spawn time for stealth. Re-run setup so
+    # Fetch domain becomes active for the affected tabs.
+    if isinstance(result, dict) and result.get("success"):
+        target_ids = instance_ids or list(dynamic_hook_system.instance_hooks.keys())
+        for inst_id in target_ids:
+            tab = await browser_manager.get_tab(inst_id)
+            if tab is not None:
+                try:
+                    await dynamic_hook_system.setup_interception(tab, inst_id)
+                except Exception as exc:
+                    debug_logger.log_warning(
+                        "server",
+                        "create_dynamic_hook",
+                        f"re-setup interception failed for {inst_id}: {exc}",
+                    )
+    return result
 
 
 @section_tool("dynamic-hooks")

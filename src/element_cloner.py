@@ -1,17 +1,36 @@
 """Advanced element cloning system with complete styling and JS extraction."""
 
 import asyncio
+import functools
 import json
 import re
-from typing import Dict, List, Any, Optional, Set, Union
-from urllib.parse import urljoin, urlparse
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Union
+from urllib.parse import urljoin, urlparse
+
 import requests
 
 try:
     from .debug_logger import debug_logger
 except ImportError:
     from debug_logger import debug_logger
+
+
+_JS_DIR = Path(__file__).parent / "js"
+
+
+@functools.lru_cache(maxsize=32)
+def _read_js_template(filename: str) -> str:
+    """Read a JS template once and cache it for the lifetime of the process.
+
+    The cloner previously re-read these files on every call, which meant a
+    single ``clone_element_complete`` call paid 6 sync disk reads on the
+    asyncio thread. Caching brings that down to one read per file ever.
+    """
+    js_file = _JS_DIR / filename
+    if not js_file.exists():
+        raise FileNotFoundError(f"JavaScript file not found: {js_file}")
+    return js_file.read_text(encoding="utf-8")
 
 class ElementCloner:
     """Advanced element cloning with full fidelity extraction."""
@@ -65,26 +84,18 @@ class ElementCloner:
             return {"error": str(e)}
 
     def _load_js_file(self, filename: str, selector: str, options: dict) -> str:
-        """Load and prepare JavaScript file with template substitution"""
-        js_dir = Path(__file__).parent / "js"
-        js_file = js_dir / filename
-        
-        if not js_file.exists():
-            raise FileNotFoundError(f"JavaScript file not found: {js_file}")
-            
-        with open(js_file, 'r', encoding='utf-8') as f:
-            js_code = f.read()
-            
+        """Apply selector + options template substitution to a cached JS template."""
+        js_code = _read_js_template(filename)
         js_code = js_code.replace('$SELECTOR$', selector)
         js_code = js_code.replace('$SELECTOR', selector)
         js_code = js_code.replace('$OPTIONS$', json.dumps(options))
         js_code = js_code.replace('$OPTIONS', json.dumps(options))
-        
+
         for key, value in options.items():
             placeholder_key = f'${key.upper()}'
             placeholder_value = 'true' if value else 'false'
             js_code = js_code.replace(placeholder_key, placeholder_value)
-        
+
         return js_code
 
     def _convert_nodriver_result(self, data):
@@ -307,15 +318,11 @@ class ElementCloner:
             if not selector:
                 return {"error": "Selector is required"}
                 
-            js_dir = Path(__file__).parent / "js"
-            js_file = js_dir / "extract_assets.js"
-            
-            if not js_file.exists():
-                return {"error": f"JavaScript file not found: {js_file}"}
-                
-            with open(js_file, 'r', encoding='utf-8') as f:
-                js_code = f.read()
-                
+            try:
+                js_code = _read_js_template("extract_assets.js")
+            except FileNotFoundError as exc:
+                return {"error": str(exc)}
+
             js_code = js_code.replace('$SELECTOR', selector)
             js_code = js_code.replace('$INCLUDE_IMAGES', 'true' if include_images else 'false')
             js_code = js_code.replace('$INCLUDE_BACKGROUNDS', 'true' if include_backgrounds else 'false')
@@ -374,15 +381,11 @@ class ElementCloner:
             Dict[str, Any]: Dict with related file data
         """
         try:
-            js_dir = Path(__file__).parent / "js"
-            js_file = js_dir / "extract_related_files.js"
-            
-            if not js_file.exists():
-                return {"error": f"JavaScript file not found: {js_file}"}
-                
-            with open(js_file, 'r', encoding='utf-8') as f:
-                js_code = f.read()
-                
+            try:
+                js_code = _read_js_template("extract_related_files.js")
+            except FileNotFoundError as exc:
+                return {"error": str(exc)}
+
             js_code = js_code.replace('$ANALYZE_CSS', 'true' if analyze_css else 'false')
             js_code = js_code.replace('$ANALYZE_JS', 'true' if analyze_js else 'false')
             js_code = js_code.replace('$FOLLOW_IMPORTS', 'true' if follow_imports else 'false')

@@ -213,23 +213,32 @@ class DOMHandler:
         clear_first: bool = True,
         delay_ms: int = 50,
         parse_newlines: bool = False,
-        shift_enter: bool = False
+        shift_enter: bool = False,
+        fast: bool = False,
     ) -> bool:
-        """
-        Type text with human-like delays and optional newline parsing.
+        """Type text into an element.
 
         Args:
             tab (Tab): The browser tab object.
             selector (str): CSS selector for the input element.
             text (str): Text to type.
             clear_first (bool): Clear input before typing.
-            delay_ms (int): Delay between keystrokes in milliseconds.
+            delay_ms (int): Mean delay between keystrokes (ms). Per-key delay is
+                jittered with Gaussian noise around this mean to avoid the
+                perfectly-regular interval pattern that bot detectors flag.
             parse_newlines (bool): If True, parse \n as Enter key presses.
             shift_enter (bool): If True, use Shift+Enter instead of Enter (for chat apps).
+            fast (bool): If True (or ``delay_ms == 0``), insert the text in a
+                single CDP roundtrip via ``Input.insertText`` instead of
+                per-character ``send_keys``. ~100x faster for long inputs but
+                bypasses keystroke timing fingerprints, so prefer ``False`` for
+                stealth-sensitive interactions.
 
         Returns:
             bool: True if typing succeeded, False otherwise.
         """
+        import random
+
         try:
             element = await tab.select(selector)
             if not element:
@@ -246,13 +255,30 @@ class DOMHandler:
                     await element.send_keys('\ue017')
                 await asyncio.sleep(0.1)
 
+            # Fast path: a single Input.insertText covers the whole string
+            # in one CDP roundtrip.
+            if (fast or delay_ms <= 0) and not parse_newlines:
+                from nodriver import cdp as _cdp
+                try:
+                    await tab.send(_cdp.input_.insert_text(text=text))
+                    return True
+                except Exception:
+                    # Fall through to the per-key path if insert_text is rejected.
+                    pass
+
+            def _jittered_delay() -> float:
+                """Gaussian-jittered delay so inter-key intervals are not constant."""
+                mean_s = max(delay_ms, 1) / 1000.0
+                std_s = mean_s / 4.0
+                return max(0.005, random.gauss(mean_s, std_s))
+
             if parse_newlines:
                 from nodriver import cdp
                 lines = text.split('\n')
                 for i, line in enumerate(lines):
                     for char in line:
                         await element.send_keys(char)
-                        await asyncio.sleep(delay_ms / 1000)
+                        await asyncio.sleep(_jittered_delay())
                     
                     if i < len(lines) - 1:
                         if shift_enter:

@@ -15,6 +15,7 @@ from models import BrowserInstance, BrowserOptions, BrowserState, PageState
 from persistent_storage import persistent_storage
 from platform_utils import get_platform_info
 from process_cleanup import process_cleanup
+from stealth_scripts import DEFAULT_STEALTH_ARGS, STEALTH_INIT_JS, pick_realistic_viewport
 
 
 _DEFAULT_MAX_INSTANCES = int(os.environ.get("MECHCP_MAX_INSTANCES", "5"))
@@ -76,8 +77,20 @@ class BrowserManager:
             config = uc.Config(
                 headless=options.headless,
                 user_data_dir=options.user_data_dir,
-                sandbox=options.sandbox
+                sandbox=options.sandbox,
             )
+            # Apply stealth Chrome flags before launch. These hide the most
+            # common automation tells (AutomationControlled banner, etc.) that
+            # the bundled nodriver defaults may not yet pin.
+            for arg in DEFAULT_STEALTH_ARGS:
+                try:
+                    config.add_argument(arg)
+                except Exception as exc:
+                    debug_logger.log_warning(
+                        "browser_manager",
+                        "spawn_browser",
+                        f"could not add stealth arg {arg}: {exc}",
+                    )
 
             browser = await uc.start(config=config)
             tab = browser.main_tab
@@ -85,8 +98,23 @@ class BrowserManager:
             if hasattr(browser, '_process') and browser._process:
                 process_cleanup.track_browser_process(instance_id, browser._process)
             else:
-                debug_logger.log_warning("browser_manager", "spawn_browser", 
+                debug_logger.log_warning("browser_manager", "spawn_browser",
                                        f"Browser {instance_id} has no process to track")
+
+            # Inject stealth init script BEFORE any UA override so the patches
+            # are in place for the very first navigation.
+            try:
+                await tab.send(
+                    uc.cdp.page.add_script_to_evaluate_on_new_document(
+                        source=STEALTH_INIT_JS,
+                    )
+                )
+            except Exception as exc:
+                debug_logger.log_warning(
+                    "browser_manager",
+                    "spawn_browser",
+                    f"stealth init script injection failed: {exc}",
+                )
 
             if options.user_agent:
                 await tab.send(uc.cdp.emulation.set_user_agent_override(
@@ -98,16 +126,18 @@ class BrowserManager:
                     headers=options.extra_headers
                 ))
 
-            await tab.set_window_size(
-                left=0,
-                top=0,
-                width=options.viewport_width,
-                height=options.viewport_height,
-            )
+            # Pick a realistic viewport if the caller stuck with the bot-fleet
+            # default (1920x1080). Explicit non-default values are honored.
+            vw, vh = options.viewport_width, options.viewport_height
+            if (vw, vh) == (1920, 1080):
+                vw, vh = pick_realistic_viewport()
+                instance.viewport = {"width": vw, "height": vh}
+
+            await tab.set_window_size(left=0, top=0, width=vw, height=vh)
             debug_logger.log_info(
                 "browser_manager",
                 "spawn_browser",
-                f"Set viewport to {options.viewport_width}x{options.viewport_height}",
+                f"Set viewport to {vw}x{vh}",
             )
 
             await self._setup_dynamic_hooks(tab, instance_id)

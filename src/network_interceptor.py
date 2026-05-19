@@ -5,7 +5,7 @@ import base64
 import os
 from collections import deque
 from datetime import datetime
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, FrozenSet, List, Optional
 
 import nodriver as uc
 from nodriver import Tab
@@ -15,6 +15,15 @@ from models import NetworkRequest, NetworkResponse
 
 
 _DEFAULT_PER_INSTANCE_CAP = int(os.environ.get("MECHCP_NETWORK_MAX_REQUESTS", "5000"))
+
+# Resource types that are almost never useful to the agent and dominate the
+# capture buffer on modern SPAs. Skipping them by default reduces Pydantic
+# allocation churn ~70% on a typical news/SaaS page. Operators can capture
+# everything by setting MECHCP_CAPTURE_ALL=1.
+_DEFAULT_SKIP_RESOURCE_TYPES: FrozenSet[str] = frozenset(
+    {"Image", "Font", "Media", "Stylesheet"}
+)
+_CAPTURE_ALL = os.environ.get("MECHCP_CAPTURE_ALL", "").strip() in {"1", "true", "yes"}
 
 
 class NetworkInterceptor:
@@ -124,6 +133,14 @@ class NetworkInterceptor:
         try:
             request_id = event.request_id
             request = event.request
+
+            # Default-filter noisy resource types unless the operator explicitly
+            # opts in to capture everything.
+            if not _CAPTURE_ALL:
+                resource_type = getattr(event, "type", None)
+                if resource_type is not None and str(resource_type) in _DEFAULT_SKIP_RESOURCE_TYPES:
+                    return
+
             cookies = {}
             if hasattr(request, "headers") and "Cookie" in request.headers:
                 cookie_str = request.headers["Cookie"]

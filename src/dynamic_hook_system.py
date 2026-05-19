@@ -255,22 +255,27 @@ class DynamicHookSystem:
                     request_patterns.append(pattern)
             
             all_patterns = request_patterns + response_patterns
-            
+
+            # If no hooks exist for this instance, do NOT enable Fetch domain.
+            # `Fetch.enable` introduces a per-request stall that detectors can
+            # measure; only pay that cost when an actual hook is installed.
             if not all_patterns:
-                all_patterns = [
-                    uc.cdp.fetch.RequestPattern(url_pattern='*', request_stage=uc.cdp.fetch.RequestStage.REQUEST),
-                    uc.cdp.fetch.RequestPattern(url_pattern='*', request_stage=uc.cdp.fetch.RequestStage.RESPONSE)
-                ]
-            
+                debug_logger.log_info(
+                    "dynamic_hook_system",
+                    "setup_interception",
+                    f"no hooks for {instance_id}; Fetch.enable deferred until first hook",
+                )
+                return
+
             await tab.send(uc.cdp.fetch.enable(patterns=all_patterns))
-            
+
             tab.add_handler(
                 uc.cdp.fetch.RequestPaused,
                 lambda event: asyncio.create_task(self._on_request_paused(tab, event, instance_id))
             )
-            
+
             debug_logger.log_info("dynamic_hook_system", "setup_interception", f"Set up interception for instance {instance_id} with {len(all_patterns)} patterns ({len(request_patterns)} request, {len(response_patterns)} response)")
-            
+
         except Exception as e:
             debug_logger.log_error("dynamic_hook_system", "setup_interception", f"Failed to setup interception: {e}")
     
