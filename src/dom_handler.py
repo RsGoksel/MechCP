@@ -500,59 +500,74 @@ class DOMHandler:
         selector: str,
         timeout: int = 30000,
         visible: bool = True,
-        text_content: Optional[str] = None
-    ) -> bool:
+        text_content: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Wait for ``selector`` to appear (and optionally become visible / contain text).
+
+        Pushes a single MutationObserver into the page that resolves a promise
+        when the condition matches. Replaces the prior 500ms polling loop
+        (~120 CDP roundtrips per 30s wait) with one Runtime.evaluate call.
+
+        Returns a snapshot dict ``{tag, id, classes, text, box}`` when matched,
+        or ``None`` on timeout.
         """
-        Wait for element to appear and match conditions.
+        import json as _json
 
-        Args:
-            tab (Tab): The browser tab object.
-            selector (str): CSS selector for the element.
-            timeout (int): Timeout in milliseconds.
-            visible (bool): Wait for element to be visible.
-            text_content (Optional[str]): Wait for element to contain text.
-
-        Returns:
-            bool: True if element matches conditions, False otherwise.
-        """
-        start_time = time.time()
-        timeout_seconds = timeout / 1000
-
-        while time.time() - start_time < timeout_seconds:
-            try:
-                element = await tab.select(selector)
-
-                if element:
-                    if visible:
-                        try:
-                            is_visible = await element.apply(
-                                """(elem) => {
-                                    var style = window.getComputedStyle(elem);
-                                    return style.display !== 'none' && 
-                                           style.visibility !== 'hidden' && 
-                                           style.opacity !== '0';
-                                }"""
-                            )
-                            if not is_visible:
-                                await asyncio.sleep(0.5)
-                                continue
-                        except Exception:
-                            pass
-
-                    if text_content:
-                        text = element.text_all
-                        if text_content not in text:
-                            await asyncio.sleep(0.5)
-                            continue
-
-                    return True
-
-            except Exception:
-                pass
-
-            await asyncio.sleep(0.5)
-
-        return False
+        text_check = _json.dumps(text_content or "")
+        js = (
+            "(async () => {"
+            "  const sel = %s;"
+            "  const wantVisible = %s;"
+            "  const wantText = %s;"
+            "  const deadline = performance.now() + %d;"
+            "  function match(el) {"
+            "    if (!el) return null;"
+            "    if (wantVisible) {"
+            "      const s = window.getComputedStyle(el);"
+            "      if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return null;"
+            "      const r = el.getBoundingClientRect();"
+            "      if (r.width === 0 || r.height === 0) return null;"
+            "    }"
+            "    if (wantText && !(el.innerText || el.textContent || '').includes(wantText)) return null;"
+            "    return el;"
+            "  }"
+            "  function snapshot(el) {"
+            "    const r = el.getBoundingClientRect();"
+            "    return {"
+            "      tag: el.tagName ? el.tagName.toLowerCase() : null,"
+            "      id: el.id || null,"
+            "      classes: (el.className && el.className.toString && el.className.toString().split(' ')) || [],"
+            "      text: (el.innerText || el.textContent || '').slice(0, 200),"
+            "      box: {x: r.x, y: r.y, w: r.width, h: r.height},"
+            "    };"
+            "  }"
+            "  return new Promise((resolve) => {"
+            "    const found = match(document.querySelector(sel));"
+            "    if (found) return resolve(snapshot(found));"
+            "    let resolved = false;"
+            "    const obs = new MutationObserver(() => {"
+            "      if (resolved) return;"
+            "      const hit = match(document.querySelector(sel));"
+            "      if (hit) { resolved = true; obs.disconnect(); resolve(snapshot(hit)); }"
+            "    });"
+            "    obs.observe(document.documentElement, {childList: true, subtree: true, attributes: true});"
+            "    const tick = () => {"
+            "      if (resolved) return;"
+            "      if (performance.now() > deadline) { resolved = true; obs.disconnect(); resolve(null); return; }"
+            "      const hit = match(document.querySelector(sel));"
+            "      if (hit) { resolved = true; obs.disconnect(); resolve(snapshot(hit)); return; }"
+            "      setTimeout(tick, 250);"
+            "    };"
+            "    setTimeout(tick, 250);"
+            "  });"
+            "})()"
+        ) % (_json.dumps(selector), "true" if visible else "false", text_check, int(timeout))
+        try:
+            result = await tab.evaluate(js, await_promise=True)
+            return result if isinstance(result, dict) else None
+        except Exception as exc:
+            debug_logger.log_error("dom_handler", "wait_for_element", exc)
+            return None
 
     @staticmethod
     async def execute_script(
