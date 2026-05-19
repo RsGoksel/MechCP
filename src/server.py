@@ -44,7 +44,30 @@ from process_cleanup import process_cleanup
 from path_safety import safe_join, sanitize_filename
 from safe_code import safe_compile
 
-DISABLED_SECTIONS = set()
+def _initial_disabled_sections() -> set:
+    """Compute the initial disabled-section set before any @section_tool runs.
+
+    Reads MECHCP_DISABLED_SECTIONS (comma-separated section names) and a
+    boolean MECHCP_MINIMAL flag. Argparse later in __main__ can still extend
+    the set, but the import-time set covers the cold-start optimization case
+    where the operator sets the env var in their MCP client config.
+    """
+    sections: set = set()
+    raw = os.environ.get("MECHCP_DISABLED_SECTIONS", "")
+    for name in raw.split(","):
+        name = name.strip()
+        if name:
+            sections.add(name)
+    if os.environ.get("MECHCP_MINIMAL", "").strip().lower() in {"1", "true", "yes"}:
+        sections.update({
+            "element-extraction", "file-extraction", "network-debugging",
+            "cdp-functions", "progressive-cloning", "cookies-storage",
+            "tabs", "debugging", "dynamic-hooks",
+        })
+    return sections
+
+
+DISABLED_SECTIONS: set = _initial_disabled_sections()
 
 def is_section_enabled(section: str) -> bool:
     """Check if a tool section is enabled."""
